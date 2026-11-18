@@ -85,6 +85,11 @@
 # 产物：app/build/outputs/apk/debug/app-debug.apk
 ```
 
+> 首次构建要下载 Gradle 和整套依赖。国内网络慢的话，可以把
+> `gradle/wrapper/gradle-wrapper.properties` 里的 `distributionUrl` 换成
+> `https\://mirrors.cloud.tencent.com/gradle/gradle-8.7-bin.zip`，
+> 依赖仓库也可以加阿里云镜像。
+
 装到手机：
 
 ```bash
