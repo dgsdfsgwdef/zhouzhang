@@ -2,15 +2,12 @@ package app.zhouzhang
 
 import android.content.Context
 import android.net.Uri
-import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
-import android.view.WindowManager
+import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.biometric.BiometricManager
-import androidx.biometric.BiometricPrompt
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -21,7 +18,6 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
-import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -33,8 +29,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.core.content.ContextCompat
-import androidx.fragment.app.FragmentActivity
 import app.zhouzhang.core.Bill
 import app.zhouzhang.core.Direction
 import app.zhouzhang.core.FlowType
@@ -55,134 +49,19 @@ import java.time.LocalDate
 import java.time.YearMonth
 import java.time.temporal.ChronoUnit
 
-/**
- * 应用锁。
- *
- * 退到后台立刻上锁，回到前台必须验证身份。允许用生物识别，也允许用系统 PIN/图案，
- * 这样没有录入指纹的用户不会把自己锁在门外。
- *
- * 设备既没生物识别也没设锁屏时，跳过验证——宁可少一层保护，也不能让 App 打不开。
- */
-class MainActivity : FragmentActivity() {
+class MainActivity : ComponentActivity() {
     private lateinit var store: BillStore
-
-    private var unlocked by mutableStateOf(false)
-    private var needsPrompt = true
-    private var canAuthenticate = true
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = BillStore(applicationContext)
-
-        // 禁止截屏，同时让最近任务里的缩略图变成空白
-        window.setFlags(
-            WindowManager.LayoutParams.FLAG_SECURE,
-            WindowManager.LayoutParams.FLAG_SECURE
-        )
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            setRecentsScreenshotEnabled(false)
-        }
-
-        canAuthenticate = checkAuthenticator()
-        if (!canAuthenticate) unlocked = true
-
         setContent {
-            ZhouTheme {
-                if (unlocked) {
-                    HomeScreen(store)
-                } else {
-                    LockScreen(onUnlock = { prompt() })
-                }
-            }
-        }
-    }
-
-    private fun checkAuthenticator(): Boolean {
-        val allowed = BiometricManager.Authenticators.BIOMETRIC_WEAK or
-                BiometricManager.Authenticators.DEVICE_CREDENTIAL
-        return BiometricManager.from(this).canAuthenticate(allowed) ==
-                BiometricManager.BIOMETRIC_SUCCESS
-    }
-
-    private fun prompt() {
-        if (!canAuthenticate) {
-            unlocked = true
-            return
-        }
-        val info = BiometricPrompt.PromptInfo.Builder()
-            .setTitle("解锁周账")
-            .setSubtitle("验证身份后查看账单")
-            // 允许生物识别或系统 PIN/图案；两者同时允许时不能再设取消按钮
-            .setAllowedAuthenticators(
-                BiometricManager.Authenticators.BIOMETRIC_WEAK or
-                        BiometricManager.Authenticators.DEVICE_CREDENTIAL
-            )
-            .build()
-
-        BiometricPrompt(
-            this,
-            ContextCompat.getMainExecutor(this),
-            object : BiometricPrompt.AuthenticationCallback() {
-                override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
-                    unlocked = true
-                }
-            }
-        ).authenticate(info)
-    }
-
-    override fun onStart() {
-        super.onStart()
-        if (needsPrompt && !unlocked) {
-            needsPrompt = false
-            prompt()
-        }
-    }
-
-    override fun onStop() {
-        super.onStop()
-        // 转屏不算退到后台
-        if (!isChangingConfigurations) {
-            unlocked = false
-            needsPrompt = true
+            ZhouTheme { HomeScreen(store) }
         }
     }
 }
 
 enum class Mode(val label: String) { WEEK("周"), MONTH("月") }
-
-@Composable
-fun LockScreen(onUnlock: () -> Unit) {
-    Box(
-        Modifier
-            .fillMaxSize()
-            .background(Ink.Bg),
-        contentAlignment = Alignment.Center,
-    ) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(
-                Icons.Rounded.Lock,
-                contentDescription = null,
-                tint = Ink.Amber,
-                modifier = Modifier.size(40.dp),
-            )
-            Spacer(Modifier.height(18.dp))
-            Text("周账已锁定", fontSize = 17.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
-            Spacer(Modifier.height(6.dp))
-            Text("验证身份后查看账单", fontSize = 13.sp, color = Ink.Muted)
-            Spacer(Modifier.height(26.dp))
-            Button(
-                onClick = onUnlock,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Ink.Text,
-                    contentColor = Color.White,
-                ),
-                shape = RoundedCornerShape(12.dp),
-            ) {
-                Text("解锁", fontSize = 14.sp)
-            }
-        }
-    }
-}
 
 fun money(cents: Long): String {
     val neg = cents < 0
