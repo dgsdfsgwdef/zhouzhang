@@ -1,0 +1,13 @@
+# 统一换行符，避免 Windows 下 checkout 把 gradlew 变成 CRLF 后无法执行
+* text=auto eol=lf
+
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+gradlew text eol=lf
+
+*.png binary
+*.jpg binary
+*.jar binary
+*.xlsx binary
+*.zip binary

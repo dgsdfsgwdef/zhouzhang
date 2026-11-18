@@ -1,0 +1,20 @@
+# Gradle / Android
+.gradle/
+build/
+/app/build/
+local.properties
+*.iml
+.idea/
+.cxx/
+.externalNativeBuild/
+captures/
+
+# 构建与测试日志
+*.log
+
+# 本机真实账单，绝不入库
+samples/private/
+
+# 系统
+.DS_Store
+Thumbs.db

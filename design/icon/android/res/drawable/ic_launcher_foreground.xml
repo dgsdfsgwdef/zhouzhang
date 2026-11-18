@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 周账 · 七段环：一周七天，首段高亮 -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:strokeColor="#F2A93B"
+        android:strokeWidth="15.00"
+        android:strokeLineCap="butt"
+        android:pathData="M54.00,29.00 A25.00,25.00 0 0 1 72.26,36.93" />
+    <path
+        android:strokeColor="#EDE7DA"
+        android:strokeWidth="15.00"
+        android:strokeLineCap="butt"
+        android:pathData="M73.55,38.41 A25.00,25.00 0 0 1 78.73,57.63" />
+    <path
+        android:strokeColor="#EDE7DA"
+        android:strokeWidth="15.00"
+        android:strokeLineCap="butt"
+        android:pathData="M78.37,59.56 A25.00,25.00 0 0 1 66.58,75.60" />
+    <path
+        android:strokeColor="#EDE7DA"
+        android:strokeWidth="15.00"
+        android:strokeLineCap="butt"
+        android:pathData="M64.85,76.52 A25.00,25.00 0 0 1 44.95,77.31" />
+    <path
+        android:strokeColor="#EDE7DA"
+        android:strokeWidth="15.00"
+        android:strokeLineCap="butt"
+        android:pathData="M43.15,76.52 A25.00,25.00 0 0 1 30.14,61.46" />
+    <path
+        android:strokeColor="#EDE7DA"
+        android:strokeWidth="15.00"
+        android:strokeLineCap="butt"
+        android:pathData="M29.63,59.56 A25.00,25.00 0 0 1 33.29,39.99" />
+    <path
+        android:strokeColor="#EDE7DA"
+        android:strokeWidth="15.00"
+        android:strokeLineCap="butt"
+        android:pathData="M34.45,38.41 A25.00,25.00 0 0 1 52.04,29.08" />
+</vector>

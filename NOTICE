@@ -1,0 +1,57 @@
+周账 (Zhouzhang)
+Copyright (C) 2026 周账 contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+--------------------------------------------------------------------------------
+
+第三方组件
+==========
+
+本项目使用以下第三方库，各自遵循其原始许可：
+
+  net.lingala.zip4j:zip4j           Apache License 2.0
+  androidx.* (Compose, Activity 等)  Apache License 2.0
+  org.jetbrains.kotlinx:kotlinx-coroutines  Apache License 2.0
+
+测试依赖（不随应用分发）：
+
+  junit:junit                        Eclipse Public License 1.0
+  net.sf.kxml:kxml2                  BSD-style / Public Domain
+  xmlpull:xmlpull                    Public Domain
+
+--------------------------------------------------------------------------------
+
+思路借鉴声明
+============
+
+本项目的实现为独立编写，未复制上述项目的源代码。
+以下项目在设计与格式适配思路上提供了参考：
+
+  vogo/aliwepaystat (Apache-2.0)
+      平台字段归一化、内部资金流转的判定思路。
+      该项目将支付宝表头写死为旧版 17 列；本项目支持新旧两版并做表头特征匹配。
+
+  yann0917/alipay-wechat-merge (MIT)
+      其 Issue #4 记录了未转义引号导致 CSV 解析失败的问题（修复历时约 14 个月）。
+      本项目据此设计了容错 CSV 读取器：字段开头的引号才视为引用起始，
+      引号内遇到引号时仅在后续为分隔符或换行时闭合。
+
+  bingchuH/Bookkeeping (MIT)
+      未分类项聚合、规则沉淀的产品思路。
+
+  mayswind/ezbookkeeping (MIT)
+      转账与内部资金流转的语义建模。
+
+若后续确有代码层面的复用，将在此处补充具体的文件与来源。
