@@ -11,8 +11,8 @@ android {
         applicationId = "app.zhouzhang"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = 2
+        versionName = "0.2.0"
     }
 
     buildTypes {
@@ -43,6 +43,19 @@ android {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
 
+    // sqlcipher-android 会带进 kotlin-stdlib 2.1.x，而本项目用 Kotlin 1.9.24，
+    // 编译器读不了 2.1 的元数据。锁回同一版本，避免传递依赖把编译器顶掉。
+    configurations.all {
+        resolutionStrategy {
+            force("org.jetbrains.kotlin:kotlin-stdlib:1.9.24")
+            force("org.jetbrains.kotlin:kotlin-stdlib-jdk7:1.9.24")
+            force("org.jetbrains.kotlin:kotlin-stdlib-jdk8:1.9.24")
+            // 2.4.0 用 Kotlin 2.1 编译，1.9 编译器读不了
+            force("androidx.sqlite:sqlite:2.3.0")
+            force("androidx.sqlite:sqlite-framework:2.3.0")
+        }
+    }
+
     testOptions {
         unitTests.all {
             // 本机验证加密账单用，密码不写进源码
@@ -64,6 +77,12 @@ dependencies {
 
     // 唯一一个"不得不加"的第三方库：Java 标准库解不了加密 zip
     implementation("net.lingala.zip4j:zip4j:2.11.5")
+
+    // 数据库加密（AES-256）。密钥由 Android Keystore 保护
+    // 4.18+ 要求 compileSdk 36/37，本项目用 34，故锁在 4.17.0
+    implementation("net.zetetic:sqlcipher-android:4.17.0")
+    // SQLCipher 的 SQLiteDatabase 实现自 SupportSQLiteDatabase，编译期需要它
+    implementation("androidx.sqlite:sqlite:2.3.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("net.sf.kxml:kxml2:2.3.0")
