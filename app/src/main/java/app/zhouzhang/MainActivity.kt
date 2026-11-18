@@ -13,7 +13,9 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ChevronLeft
@@ -35,8 +37,10 @@ import app.zhouzhang.core.FlowType
 import app.zhouzhang.core.Parser
 import app.zhouzhang.core.Week
 import app.zhouzhang.data.BillStore
+import app.zhouzhang.data.CategoryRule
 import app.zhouzhang.data.CategorySum
 import app.zhouzhang.data.DaySum
+import app.zhouzhang.data.MerchantSum
 import app.zhouzhang.data.MonthSummary
 import app.zhouzhang.data.WeekSummary
 import app.zhouzhang.ui.Ink
@@ -73,6 +77,7 @@ fun weekdayLabel(d: LocalDate): String = when (d.dayOfWeek.value) {
     1 -> "一"; 2 -> "二"; 3 -> "三"; 4 -> "四"; 5 -> "五"; 6 -> "六"; else -> "日"
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(store: BillStore) {
     val ctx = LocalContext.current
@@ -99,12 +104,19 @@ fun HomeScreen(store: BillStore) {
     var askPassword by remember { mutableStateOf(false) }
     var password by remember { mutableStateOf("") }
     var passwordError by remember { mutableStateOf<String?>(null) }
+    var pendingQueue by remember { mutableStateOf<List<Uri>>(emptyList()) }
+
+    var hasData by remember { mutableStateOf(false) }
+    var undoCount by remember { mutableStateOf(0) }
+    var showRules by remember { mutableStateOf(false) }
 
     fun refresh() {
         weekSum = store.summary(weekStart)
         bills = store.billsOfWeek(weekStart)
         monthSum = store.monthSummary(month)
         earliest = store.earliestDate()
+        hasData = store.totalCount() > 0
+        undoCount = store.pendingUndoCount()
 
         // 本周只过了几天，就只和上周同样天数比；过去的周则整周对比。
         val days = if (weekStart == thisWeek) {
@@ -116,72 +128,133 @@ fun HomeScreen(store: BillStore) {
 
     LaunchedEffect(weekStart, month) { withContext(Dispatchers.IO) { refresh() } }
 
-    fun startImport(uri: Uri, pwd: String?) {
+    /**
+     * 支持一次选多个文件（微信 + 支付宝一起导）。
+     * 中途遇到加密包就停下问密码，剩下的排进队列，输完接着导。
+     */
+    fun importFiles(uris: List<Uri>, pwd: String?) {
+        if (uris.isEmpty()) return
         busy = true
         scope.launch {
-            try {
-                val payload = withContext(Dispatchers.IO) { readBytes(ctx, uri) }
-                val result = withContext(Dispatchers.Default) {
-                    Parser.parse(payload.first, payload.second, pwd)
-                }
-                when {
-                    result.needsPassword -> {
-                        pendingUri = uri
-                        passwordError = result.error
-                        askPassword = true
+            var parsed = 0
+            var added = 0
+            var duplicated = 0
+            var issues = 0
+            val problems = ArrayList<String>()
+            var needPassword: Uri? = null
+            var rest: List<Uri> = emptyList()
+
+            for ((index, uri) in uris.withIndex()) {
+                try {
+                    val payload = withContext(Dispatchers.IO) { readBytes(ctx, uri) }
+                    val result = withContext(Dispatchers.Default) {
+                        Parser.parse(payload.first, payload.second, pwd)
                     }
-
-                    result.error != null -> message = result.error
-
-                    else -> {
-                        val counts = withContext(Dispatchers.IO) { store.insertAll(result.bills) }
-                        message = buildString {
-                            append("${result.platform?.label} · ${result.formatVersion} · ${result.encoding}\n\n")
-                            append("解析 ${result.bills.size} 条\n")
-                            append("新增 ${counts.first} 条，重复 ${counts.second} 条")
-                            if (result.issues.isNotEmpty()) append("\n无法解析 ${result.issues.size} 条")
+                    when {
+                        result.needsPassword -> {
+                            needPassword = uri
+                            rest = uris.drop(index + 1)
+                            break
                         }
-                        password = ""
-                        passwordError = null
-                        withContext(Dispatchers.IO) { refresh() }
+
+                        result.error != null -> problems.add("${payload.second}：${result.error}")
+
+                        else -> {
+                            val counts = withContext(Dispatchers.IO) { store.insertAll(result.bills) }
+                            parsed += result.bills.size
+                            added += counts.first
+                            duplicated += counts.second
+                            issues += result.issues.size
+                        }
                     }
+                } catch (e: Exception) {
+                    problems.add(e.message ?: "读取失败")
                 }
-            } catch (e: Exception) {
-                message = e.message ?: "导入失败"
-            } finally {
-                busy = false
             }
+
+            if (needPassword != null) {
+                pendingUri = needPassword
+                pendingQueue = rest
+                passwordError = "这个账单压缩包有密码，请输入解压密码"
+                askPassword = true
+                busy = false
+                return@launch
+            }
+
+            password = ""
+            passwordError = null
+            pendingQueue = emptyList()
+
+            message = buildString {
+                if (uris.size > 1) append("共 ${uris.size} 个文件\n\n")
+                append("解析 $parsed 条\n")
+                append("新增 $added 条，重复 $duplicated 条")
+                if (issues > 0) append("\n无法解析 $issues 条")
+                if (problems.isNotEmpty()) {
+                    append("\n\n")
+                    problems.forEach { append("· $it\n") }
+                }
+            }
+
+            if (added > 0) {
+                // 导完直接跳到最新有数据的周，否则停在空的本周像是失败了
+                withContext(Dispatchers.IO) { store.latestDataWeek() }?.let { latest ->
+                    weekStart = latest
+                    month = YearMonth.from(latest)
+                }
+            }
+            withContext(Dispatchers.IO) { refresh() }
+            busy = false
         }
     }
 
-    val picker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        if (uri != null) startImport(uri, null)
+    val picker = rememberLauncherForActivityResult(
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris ->
+        if (!uris.isNullOrEmpty()) importFiles(uris, null)
+    }
+
+    val mimeTypes = arrayOf(
+        "text/csv",
+        "text/comma-separated-values",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/zip",
+        "application/x-zip-compressed",
+        "application/octet-stream",
+        "*/*",
+    )
+
+    fun doUndo() {
+        scope.launch {
+            val n = withContext(Dispatchers.IO) { store.undoLastImport() }
+            withContext(Dispatchers.IO) { refresh() }
+            message = "已撤销 $n 条记录"
+        }
     }
 
     Scaffold(
         containerColor = Ink.Bg,
         floatingActionButton = {
-            ExtendedFloatingActionButton(
-                onClick = {
-                    picker.launch(
-                        arrayOf(
-                            "text/csv",
-                            "text/comma-separated-values",
-                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                            "application/zip",
-                            "application/x-zip-compressed",
-                            "application/octet-stream",
-                            "*/*",
-                        )
-                    )
-                },
-                containerColor = Ink.Text,
-                contentColor = Color.White,
-                icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
-                text = { Text(if (busy) "解析中…" else "导入账单") },
-            )
+            if (hasData) {
+                ExtendedFloatingActionButton(
+                    onClick = { picker.launch(mimeTypes) },
+                    containerColor = Ink.Text,
+                    contentColor = Color.White,
+                    icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
+                    text = { Text(if (busy) "解析中…" else "导入账单") },
+                )
+            }
         }
     ) { pad ->
+        if (!hasData) {
+            Onboarding(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .padding(pad),
+                busy = busy,
+                onImport = { picker.launch(mimeTypes) },
+            )
+        } else {
         LazyColumn(
             modifier = Modifier
                 .fillMaxSize()
@@ -190,8 +263,29 @@ fun HomeScreen(store: BillStore) {
             contentPadding = PaddingValues(top = 20.dp, bottom = 96.dp),
         ) {
             item {
-                ModeSwitch(mode) { mode = it }
-                Spacer(Modifier.height(22.dp))
+                Row(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    ModeSwitch(mode) { mode = it }
+                    TextButton(onClick = { showRules = true }) {
+                        Text("分类整理", fontSize = 13.sp, color = Ink.Muted)
+                    }
+                }
+                if (undoCount > 0) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text("上次导入新增 $undoCount 条", fontSize = 12.sp, color = Ink.Muted)
+                        TextButton(onClick = { doUndo() }) {
+                            Text("撤销", fontSize = 13.sp, color = Ink.Amber)
+                        }
+                    }
+                }
+                Spacer(Modifier.height(18.dp))
             }
 
             if (mode == Mode.WEEK) {
@@ -343,6 +437,7 @@ fun HomeScreen(store: BillStore) {
                 }
             }
         }
+        }
     }
 
     if (message != null) {
@@ -383,8 +478,9 @@ fun HomeScreen(store: BillStore) {
                 TextButton(
                     onClick = {
                         val uri = pendingUri
+                        val queue = pendingQueue
                         askPassword = false
-                        if (uri != null) startImport(uri, password)
+                        if (uri != null) importFiles(listOf(uri) + queue, password)
                     }
                 ) { Text("解压") }
             },
@@ -399,7 +495,249 @@ fun HomeScreen(store: BillStore) {
             containerColor = Ink.Surface,
         )
     }
+
+    if (showRules) {
+        ModalBottomSheet(
+            onDismissRequest = { showRules = false },
+            containerColor = Ink.Surface,
+        ) {
+            RulesSheet(store) { refresh() }
+        }
+    }
 }
+
+/** 空状态引导：新用户打开就是一片空白，得先告诉他账单从哪来 */
+@Composable
+fun Onboarding(modifier: Modifier = Modifier, busy: Boolean, onImport: () -> Unit) {
+    Column(
+        modifier
+            .padding(horizontal = 28.dp)
+            .verticalScroll(rememberScrollState()),
+    ) {
+        Spacer(Modifier.height(56.dp))
+        Text("周账", fontSize = 26.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+        Spacer(Modifier.height(8.dp))
+        Text(
+            "导入微信和支付宝的官方账单，看每周花了多少、花在哪。数据只存在这台手机上。",
+            fontSize = 14.sp,
+            lineHeight = 22.sp,
+            color = Ink.Muted,
+        )
+
+        Spacer(Modifier.height(34.dp))
+        Text("账单从哪来", fontSize = 13.sp, color = Ink.Muted)
+        Spacer(Modifier.height(12.dp))
+
+        StepCard(
+            "微信",
+            "我 → 服务 → 钱包 → 账单 → 常见问题 → 下载账单 → 用于个人对账，填邮箱和支付密码。",
+            "邮件里是加密压缩包，解压码由「微信支付」公众号推送。",
+        )
+        Spacer(Modifier.height(12.dp))
+        StepCard(
+            "支付宝",
+            "我的 → 账单 → 右上角「…」→ 开具交易流水证明 → 用于个人对账，发到邮箱。",
+            "邮件里是加密 zip，密码通常是身份证后 6 位或手机号后 6 位。",
+        )
+
+        Spacer(Modifier.height(30.dp))
+        Button(
+            onClick = onImport,
+            enabled = !busy,
+            modifier = Modifier
+                .fillMaxWidth()
+                .height(50.dp),
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Ink.Text,
+                contentColor = Color.White,
+            ),
+            shape = RoundedCornerShape(13.dp),
+        ) {
+            Text(if (busy) "解析中…" else "导入账单", fontSize = 15.sp)
+        }
+        Spacer(Modifier.height(12.dp))
+        Text(
+            "支持 CSV、XLSX 和加密 zip，可以一次选多个文件。",
+            fontSize = 12.sp,
+            color = Ink.Muted,
+        )
+        Spacer(Modifier.height(40.dp))
+    }
+}
+
+@Composable
+fun StepCard(platform: String, path: String, note: String) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Ink.Surface),
+        shape = RoundedCornerShape(14.dp),
+        elevation = CardDefaults.cardElevation(0.dp),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Text(platform, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+            Spacer(Modifier.height(6.dp))
+            Text(path, fontSize = 13.sp, lineHeight = 20.sp, color = Ink.Text)
+            Spacer(Modifier.height(6.dp))
+            Text(note, fontSize = 12.sp, lineHeight = 18.sp, color = Ink.Muted)
+        }
+    }
+}
+
+/** 分类整理：把未分类商户按金额列出来，点一下归到某类，并记住规则 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun RulesSheet(store: BillStore, onChanged: () -> Unit) {
+    val scope = rememberCoroutineScope()
+    var merchants by remember { mutableStateOf<List<MerchantSum>>(emptyList()) }
+    var rules by remember { mutableStateOf<List<CategoryRule>>(emptyList()) }
+    var picking by remember { mutableStateOf<MerchantSum?>(null) }
+    var note by remember { mutableStateOf<String?>(null) }
+
+    fun reload() {
+        scope.launch {
+            withContext(Dispatchers.IO) {
+                merchants = store.uncategorizedMerchants()
+                rules = store.rules()
+            }
+        }
+    }
+
+    LaunchedEffect(Unit) { withContext(Dispatchers.IO) { reload() } }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = 620.dp)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 28.dp),
+    ) {
+        Text("分类整理", fontSize = 17.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "给商户指定一次分类，之后同类交易自动套用。",
+            fontSize = 12.sp,
+            color = Ink.Muted,
+        )
+
+        if (note != null) {
+            Spacer(Modifier.height(10.dp))
+            Text(note!!, fontSize = 12.sp, color = Ink.Amber)
+        }
+
+        Spacer(Modifier.height(18.dp))
+        Text("待归类", fontSize = 13.sp, color = Ink.Muted)
+        Spacer(Modifier.height(8.dp))
+
+        if (merchants.isEmpty()) {
+            Text("没有未分类的支出了", fontSize = 13.sp, color = Ink.Muted)
+        } else {
+            merchants.forEach { m ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .clickable { picking = m }
+                        .padding(vertical = 10.dp, horizontal = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(m.name, fontSize = 14.sp, color = Ink.Text, maxLines = 1)
+                        Spacer(Modifier.height(2.dp))
+                        Text("${m.count} 笔", fontSize = 11.sp, color = Ink.Muted)
+                    }
+                    Text(money(m.cents), fontSize = 14.sp, color = Ink.Text)
+                    Spacer(Modifier.width(8.dp))
+                    Text("归类 ›", fontSize = 12.sp, color = Ink.Amber)
+                }
+                HorizontalDivider(color = Ink.Divider)
+            }
+        }
+
+        Spacer(Modifier.height(24.dp))
+        Text("已生效的规则", fontSize = 13.sp, color = Ink.Muted)
+        Spacer(Modifier.height(8.dp))
+
+        if (rules.isEmpty()) {
+            Text("还没有自定义规则", fontSize = 13.sp, color = Ink.Muted)
+        } else {
+            rules.forEach { r ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Text(
+                        r.keyword,
+                        fontSize = 13.sp,
+                        color = Ink.Text,
+                        maxLines = 1,
+                        modifier = Modifier.weight(1f),
+                    )
+                    Text(r.category, fontSize = 13.sp, color = Ink.Muted)
+                    Spacer(Modifier.width(12.dp))
+                    TextButton(
+                        onClick = {
+                            scope.launch {
+                                withContext(Dispatchers.IO) { store.deleteRule(r.id) }
+                                reload()
+                                onChanged()
+                                note = "已删除规则「${r.keyword}」"
+                            }
+                        },
+                        contentPadding = PaddingValues(0.dp),
+                    ) {
+                        Text("删除", fontSize = 12.sp, color = Ink.Muted)
+                    }
+                }
+                HorizontalDivider(color = Ink.Divider)
+            }
+        }
+        Spacer(Modifier.height(20.dp))
+    }
+
+    picking?.let { m ->
+        AlertDialog(
+            onDismissRequest = { picking = null },
+            title = { Text("「${m.name}」归到哪一类", fontSize = 15.sp) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    CATEGORIES.forEach { c ->
+                        Text(
+                            c,
+                            fontSize = 15.sp,
+                            color = Ink.Text,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(8.dp))
+                                .clickable {
+                                    val target = m
+                                    picking = null
+                                    scope.launch {
+                                        val n = withContext(Dispatchers.IO) {
+                                            store.addRule(target.name, c)
+                                        }
+                                        reload()
+                                        onChanged()
+                                        note = "「${target.name}」→ $c，更新了 $n 笔"
+                                    }
+                                }
+                                .padding(vertical = 12.dp, horizontal = 8.dp),
+                        )
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { picking = null }) { Text("取消") }
+            },
+            containerColor = Ink.Surface,
+        )
+    }
+}
+
+val CATEGORIES = listOf("餐饮", "交通", "购物", "居家", "娱乐", "医疗", "教育", "通讯", "其他")
 
 @Composable
 fun ModeSwitch(mode: Mode, onChange: (Mode) -> Unit) {

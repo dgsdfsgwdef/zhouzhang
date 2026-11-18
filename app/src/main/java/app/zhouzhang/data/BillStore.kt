@@ -35,6 +35,9 @@ data class WeekSummary(
     val days: List<DaySum>,
 )
 
+data class MerchantSum(val name: String, val cents: Long, val count: Int)
+data class CategoryRule(val id: Long, val keyword: String, val category: String)
+
 /**
  * 数据库全部落盘即加密（SQLCipher，AES-256）。
  *
@@ -45,7 +48,11 @@ class BillStore(private val context: Context) {
 
     companion object {
         private const val DB_NAME = "zhouzhang.db"
-        private const val SCHEMA_VERSION = 2
+        private const val SCHEMA_VERSION = 3
+
+        private const val PREFS = "zz_import"
+        private const val PREF_UNDO_MAX_ID = "undo_max_id"
+        private const val PREF_UNDO_COUNT = "undo_count"
 
         /** 与建表顺序一致，迁移时按列拷贝 */
         private val COLUMNS = listOf(
@@ -87,6 +94,20 @@ class BillStore(private val context: Context) {
                 source_file TEXT NOT NULL DEFAULT ''
             )
         """.trimIndent()
+
+        /**
+         * 用户自定义的分类规则。
+         * 关键词命中商户名或商品名就把分类改掉，优先级高于内置关键词表——
+         * 用户既然手动指了，就按用户的来。
+         */
+        private val RULE_DDL = """
+            CREATE TABLE IF NOT EXISTS category_rule (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                keyword TEXT NOT NULL,
+                category TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            )
+        """.trimIndent()
     }
 
     private var opened: SQLiteDatabase? = null
@@ -124,6 +145,7 @@ class BillStore(private val context: Context) {
 
         val db = SQLiteDatabase.openOrCreateDatabase(file, passphrase, null, null)
         db.execSQL(DDL)
+        db.execSQL(RULE_DDL)
         db.execSQL("CREATE INDEX IF NOT EXISTS ix_week ON bill(week_start, flow_type, direction)")
         db.execSQL("CREATE INDEX IF NOT EXISTS ix_time ON bill(txn_time)")
         db.execSQL(
@@ -179,14 +201,34 @@ class BillStore(private val context: Context) {
 
     // ---------------------------------------------------------------- 写入
 
+    private val prefs by lazy { context.getSharedPreferences(PREFS, Context.MODE_PRIVATE) }
+
+    private fun maxId(db: SQLiteDatabase): Long {
+        db.rawQuery("SELECT COALESCE(MAX(id),0) FROM bill", null).use { c ->
+            return if (c.moveToFirst()) c.getLong(0) else 0L
+        }
+    }
+
     /** 返回 (新增, 重复)。重复靠 (platform, order_no) 唯一索引挡掉。 */
     fun insertAll(bills: List<Bill>, startDay: Int = Week.DEFAULT_START_DAY): Pair<Int, Int> {
         if (bills.isEmpty()) return 0 to 0
         val db = db()
+
+        // 用户规则优先于内置关键词
+        val rules = rules(db)
+        val prepared = if (rules.isEmpty()) bills else bills.map { b ->
+            val hit = rules.firstOrNull {
+                it.keyword.isNotBlank() &&
+                        (b.counterparty.contains(it.keyword) || b.item.contains(it.keyword))
+            }
+            if (hit != null) b.copy(category = hit.category) else b
+        }
+
+        val before = maxId(db)
         var inserted = 0
         db.beginTransaction()
         try {
-            for (b in bills) {
+            for (b in prepared) {
                 val cv = ContentValues().apply {
                     put("txn_time", b.txnTime.atZone(ZoneId.systemDefault()).toInstant().toEpochMilli())
                     put("week_start", Week.key(b.txnTime.toLocalDate(), startDay))
@@ -211,7 +253,79 @@ class BillStore(private val context: Context) {
         } finally {
             db.endTransaction()
         }
-        return inserted to (bills.size - inserted)
+
+        if (inserted > 0) {
+            prefs.edit()
+                .putLong(PREF_UNDO_MAX_ID, before)
+                .putInt(PREF_UNDO_COUNT, inserted)
+                .apply()
+        }
+        return inserted to (prepared.size - inserted)
+    }
+
+    // ---------------------------------------------------------------- 撤销导入
+
+    fun pendingUndoCount(): Int = prefs.getInt(PREF_UNDO_COUNT, 0)
+
+    /**
+     * 撤销上一次导入。自增 id 单调递增，所以「删掉 id 大于导入前最大 id 的行」
+     * 正好等于撤销这一批，不需要额外记录批次号。
+     */
+    fun undoLastImport(): Int {
+        val before = prefs.getLong(PREF_UNDO_MAX_ID, -1)
+        if (before < 0) return 0
+        val deleted = db().delete("bill", "id > ?", arrayOf(before.toString()))
+        prefs.edit().remove(PREF_UNDO_MAX_ID).remove(PREF_UNDO_COUNT).apply()
+        return deleted
+    }
+
+    // ---------------------------------------------------------------- 分类规则
+
+    fun rules(): List<CategoryRule> = rules(db())
+
+    private fun rules(db: SQLiteDatabase): List<CategoryRule> {
+        val out = ArrayList<CategoryRule>()
+        db.rawQuery("SELECT id, keyword, category FROM category_rule ORDER BY id", null).use { c ->
+            while (c.moveToNext()) {
+                out.add(CategoryRule(c.getLong(0), c.getString(1), c.getString(2)))
+            }
+        }
+        return out
+    }
+
+    /** 新增规则并立刻重算历史数据，返回被改写的行数 */
+    fun addRule(keyword: String, category: String): Int {
+        val db = db()
+        db.execSQL(
+            "INSERT INTO category_rule(keyword, category, created_at) VALUES(?,?,?)",
+            arrayOf(keyword, category, System.currentTimeMillis())
+        )
+        return db.update(
+            "bill",
+            ContentValues().apply { put("category", category) },
+            "counterparty LIKE ? OR item LIKE ?",
+            arrayOf("%$keyword%", "%$keyword%")
+        )
+    }
+
+    fun deleteRule(id: Long) {
+        db().delete("category_rule", "id = ?", arrayOf(id.toString()))
+    }
+
+    /** 未分类的商户，按金额从大到小——先解决大头 */
+    fun uncategorizedMerchants(limit: Int = 30): List<MerchantSum> {
+        val out = ArrayList<MerchantSum>()
+        db().rawQuery(
+            "SELECT counterparty, SUM(amount_cents) s, COUNT(*) c FROM bill " +
+                    "WHERE category='未分类' AND flow_type=? AND direction=? " +
+                    "AND counterparty <> '' GROUP BY counterparty ORDER BY s DESC LIMIT $limit",
+            arrayOf(FlowType.CONSUMPTION.name, Direction.EXPENSE.name)
+        ).use { c ->
+            while (c.moveToNext()) {
+                out.add(MerchantSum(c.getString(0), c.getLong(1), c.getInt(2)))
+            }
+        }
+        return out
     }
 
     // ---------------------------------------------------------------- 查询
@@ -353,6 +467,16 @@ class BillStore(private val context: Context) {
             if (c.moveToFirst() && !c.isNull(0)) {
                 return Instant.ofEpochMilli(c.getLong(0))
                     .atZone(ZoneId.systemDefault()).toLocalDate()
+            }
+        }
+        return null
+    }
+
+    /** 最新有数据的周，导入后自动跳过去——否则导完还停在空的本周，像是失败了 */
+    fun latestDataWeek(): LocalDate? {
+        db().rawQuery("SELECT MAX(week_start) FROM bill", null).use { c ->
+            if (c.moveToFirst() && !c.isNull(0)) {
+                return runCatching { LocalDate.parse(c.getString(0)) }.getOrNull()
             }
         }
         return null
