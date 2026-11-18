@@ -11,8 +11,8 @@ android {
         applicationId = "app.zhouzhang"
         minSdk = 26
         targetSdk = 34
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.3.0"
     }
 
     buildTypes {
@@ -83,6 +83,10 @@ dependencies {
     implementation("net.zetetic:sqlcipher-android:4.17.0")
     // SQLCipher 的 SQLiteDatabase 实现自 SupportSQLiteDatabase，编译期需要它
     implementation("androidx.sqlite:sqlite:2.3.0")
+
+    // 应用锁：BiometricPrompt 要求宿主是 FragmentActivity
+    implementation("androidx.fragment:fragment:1.6.2")
+    implementation("androidx.biometric:biometric:1.1.0")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("net.sf.kxml:kxml2:2.3.0")
