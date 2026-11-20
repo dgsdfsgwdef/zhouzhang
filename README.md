@@ -1,174 +1,161 @@
-# 周账
+# Zhouzhang
 
-把微信和支付宝的官方账单，变成「每周花了多少、花在哪」。
+English | [简体中文](README.zh-CN.md)
 
-数据存在本机，不需要注册。默认不联网；开了邮箱收单之后，也只连你自己填写的 IMAP 服务器。
+Zhouzhang (周账, roughly "weekly ledger") is an Android app that reads the official WeChat Pay and Alipay bill exports and turns them into weekly and monthly totals: how much went out, and where it went.
 
-> **状态：v0.5.0。** 数据库已加密（SQLCipher + Android Keystore）。
+The data stays on the phone. There is no account to create and no server to trust. The app makes no network requests unless you turn on email import, and even then it only talks to the IMAP server you enter yourself.
 
----
+**Status:** v0.5.0. The database is encrypted with SQLCipher, keyed from the Android Keystore.
 
-## 为什么做这个
+## Why another bill app
 
-现成的账单合并工具几乎都栽在同一件事上：**支付宝改了导出格式**。
+Most tools that merge WeChat and Alipay bills break on the same thing: Alipay changed its export format.
 
-2023 年之后「开具交易流水证明」给的是 12 列 CSV，而多数开源工具（含一些几千星的）仍写死旧版 17 列的表头和下标。它们不会报错，只会算出错误的数字——这比崩溃更糟。
+Since 2023, "apply for transaction statement" gives you a 12-column CSV. A lot of open-source tools, including some with a few thousand stars, still hard-code the 17-column header and column indexes from the old format. They don't fail loudly. They just report wrong totals, which is harder to notice than a crash.
 
-微信这边也在 2026 年改成了 **xlsx**：时间列不是字符串，是 Excel 序列号 `46344.655…`；金额是数值不是 `¥32.00`。
+WeChat changed as well, to xlsx in 2026. The time column is an Excel serial number (`46344.655...`) instead of a string, and amounts are numbers instead of `¥32.00`.
 
-这个项目从第一行代码就按真实格式写，并且拿真实账单验证过：微信 63 条、支付宝 91 条，都与账单文件自己声明的笔数一致。
+Both parsers were written against the real files and checked against them: 63 rows from a WeChat statement and 91 from an Alipay one, each matching the row count the file declares about itself.
 
----
+## What it does
 
-## 现在能做什么
+### Import
 
-**导入**
-
-| 输入 | 说明 |
+| Input | Notes |
 |---|---|
-| 微信 xlsx / csv | 自动跳过前 17 行说明；Excel 序列号时间正确还原 |
-| 支付宝 csv（新 12 列） | GB18030 解码 |
-| 支付宝 csv（旧 17 列） | GBK 解码，全角括号列名兼容 |
-| 加密 zip | 提示输入密码，**内存解压不落盘** |
+| WeChat xlsx / csv | Skips the 17-line preamble; restores Excel serial timestamps |
+| Alipay csv (new, 12 columns) | Decoded as GB18030 |
+| Alipay csv (old, 17 columns) | Decoded as GBK; handles full-width parentheses in headers |
+| Encrypted zip | Asks for the password, extracts in memory, writes nothing to disk |
 
-**一次可以选多个文件**，微信和支付宝一起导。导错了能撤销——自增 id 单调递增，删掉导入后新增的行正好等于回滚这一批。
+You can select several files at once and import WeChat and Alipay together. Imports can be undone: row ids only increase, so deleting the rows an import added rolls back exactly that batch.
 
-首次打开是空状态，直接写清两家的导出路径，不用去别处查。
+The empty state tells you where both export screens are, so you don't have to go looking for the instructions.
 
-**邮箱收单**：填一次 IMAP 账号和授权码，之后账单邮件到了点一下「收信」就进库，不用再翻文件夹找附件。授权码和解压码都用 Keystore 加密保存。
+### Email import
 
-**清洗**（不洗的话支出会虚高 30% 以上）
+Enter an IMAP account and app password once. When a statement email arrives, tap "Fetch" and the attachment goes into the database, no digging through folders for attachments. The app password and any zip password are encrypted with the Keystore.
 
-- 转账、红包、提现、群收款 → 不计入消费
-- 余额宝、零钱通、基金 → 不计入消费
-- 花呗、借呗、信用卡还款 → 不计入消费
-- 退款单独标记，不混进消费
-- 按交易单号去重，同一份账单导两次不会翻倍
+### Cleaning
 
-**分类**
+Skip this and spending comes out 30% or more too high.
 
-关键词规则 + 支付宝自带的「交易分类」兜底（商户名猜不出来时，用它）。
+- Transfers, red packets, withdrawals and group collections are not spending
+- Yu'ebao, Lingqiantong and fund purchases are not spending
+- Huabei, Jiebei and credit card repayments are not spending
+- Refunds are flagged separately and kept out of the totals
+- Rows are deduplicated by transaction id, so importing the same statement twice doesn't double anything
 
-猜不出来也没关系：右上角「分类整理」会把未分类的商户按金额列出来，点一下选个分类，**自动生成规则并重算历史数据**。以后同类商户直接命中。
+### Categories
 
-**查看**
+Keyword rules first, with Alipay's own transaction category as a fallback when the merchant name tells you nothing.
 
-- 周视图：默认周一起止，可在设置里改成任意一天；左右翻周，环比用**上周同期**而非完整上周
-- 月视图：自然月统计，分类占比、Top 商户、环比上月
-- 导入后自动跳到最新有数据的周——否则导完还停在空的本周，像是失败了
+What's left over is easy to fix. "Tidy categories" lists uncategorised merchants by amount; pick a category for one and the app creates a rule and recalculates history. Similar merchants hit the new rule from then on.
 
----
+### Views
 
-## 隐私
+- Week view: Monday to Sunday by default, any start day in settings. Swipe between weeks. The comparison uses the same days of the previous week, not the full previous week.
+- Month view: calendar month, category share, top merchants, change from last month.
+- After an import the app jumps to the most recent week that has data. Landing on an empty current week makes a successful import look like a failed one.
 
-这个 App 的卖点是「数据不出设备」，所以把它做成了可验证的：
+## Privacy
 
-- **`INTERNET` 只用于邮箱收单** —— 不配置邮箱时不会发起任何网络请求；配置后也只直连你填写的 IMAP 服务器（强制 TLS 1.2+ 并校验主机名），没有第三方服务端中转
-- **禁止截屏** —— 截图、录屏、最近任务缩略图都是空白，金额不会从系统层面漏出去
-- **数据库加密** —— SQLCipher（AES-256）。32 字节口令由 Android Keystore 里的 AES 密钥封装后存储，口令本身不出现在代码或明文配置里
-- **只走 TLS** —— `networkSecurityConfig` 显式禁掉明文流量，只信任系统根证书（装了用户证书也解不了授权码）
-- 无统计 SDK、无广告 SDK、无崩溃上报
-- zip 在内存里解压，不产生临时文件；解压体积、行列数都有硬上限，压缩炸弹撑不爆
-- `allowBackup=false`，不进系统云备份
+The selling point is that data doesn't leave the device, so the app tries to make that checkable instead of just stating it.
 
-数据库文件头已不是 `SQLite format 3`，用任何 SQLite 工具直接打开都是乱码——这是可以自己验证的。
+- `INTERNET` is used for email import only. With no mailbox configured, the app makes no network requests. With one configured, it connects directly to that IMAP server (TLS 1.2+ enforced, hostname verified). Nothing is relayed through a third party.
+- Screenshots are blocked. Screenshots, screen recordings and the recent-apps thumbnail all come out blank.
+- The database is encrypted with SQLCipher (AES-256). The 32-byte passphrase is wrapped by an AES key in the Android Keystore; it never appears in code or in plain configuration.
+- `networkSecurityConfig` disables cleartext traffic and trusts only system roots, so a user-installed certificate can't read the app password.
+- No analytics SDK, no ad SDK, no crash reporting.
+- Zip extraction happens in memory, with hard caps on expanded size, entry count, rows and columns, so a zip bomb can't take the app down.
+- `allowBackup=false`, so the database stays out of cloud backups.
 
-### 已知局限（不藏着）
+The database file no longer begins with `SQLite format 3`. Open it with any SQLite tool and you get garbage. You can check that yourself.
 
-- 没有应用锁（生物识别/PIN）——已评估后放弃，不打算做
-- 分类规则较薄，未分类占比可能偏高
-- root 且能注入进程的设备仍可绕过 Keystore——这是所有本地加密的共性局限
-- 安卓无障碍/通知监听自动记账**不做**——那是随时会坏的方案
+### Known limitations
 
----
+- No app lock (biometric or PIN). It was evaluated, dropped, and isn't planned.
+- Category rules are thin, so the uncategorised share can be high.
+- A rooted device that can inject into the process can still get around the Keystore. That applies to every local encryption scheme.
+- Automatic tracking through an accessibility service or notification listener is not implemented. It's an approach that breaks with OS updates.
 
-## 怎么导出账单
+## Exporting your bills
 
-**微信**：我 → 服务 → 钱包 → 账单 → 常见问题 → 下载账单 → 用于个人对账 → 填邮箱 + 支付密码。加密压缩包，解压码由「微信支付」公众号推送。
+**WeChat:** Me → Services → Wallet → Bills → Common questions → Download bill → For personal reconciliation → enter email and payment password. You get an encrypted zip; the password arrives as a message from the WeChat Pay official account.
 
-**支付宝**：我的 → 账单 → 右上角「…」→ 开具交易流水证明 → 用于个人对账 → 邮箱收 zip。
+**Alipay:** Me → Bills → "…" (top right) → Apply for transaction statement → For personal reconciliation → the zip is sent to your email.
 
----
+## Build
 
-## 构建
-
-需要 JDK 17 和 Android SDK（compileSdk 34）。
+JDK 17 and the Android SDK (compileSdk 34).
 
 ```bash
 ./gradlew assembleDebug
-# 产物：app/build/outputs/apk/debug/app-debug.apk
+# output: app/build/outputs/apk/debug/app-debug.apk
 ```
 
-> 首次构建要下载 Gradle 和整套依赖。国内网络慢的话，可以把
-> `gradle/wrapper/gradle-wrapper.properties` 里的 `distributionUrl` 换成
-> `https\://mirrors.cloud.tencent.com/gradle/gradle-8.7-bin.zip`，
-> 依赖仓库也可以加阿里云镜像。
+The first build downloads Gradle and the whole dependency set. On a slow connection in mainland China, you can point `distributionUrl` in `gradle/wrapper/gradle-wrapper.properties` at `https://mirrors.cloud.tencent.com/gradle/gradle-8.7-bin.zip`, and add Aliyun mirrors for the dependency repositories.
 
-装到手机：
+Install on a device:
 
 ```bash
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-## 测试
+## Tests
 
 ```bash
 ./gradlew testDebugUnitTest
 ```
 
-解析层是**纯 Kotlin、零 Android 依赖**的，所以格式适配的全部逻辑都能在 JVM 上跑测试，不用开模拟器。这是保证正确率的关键。
+The parsing layer is plain Kotlin with no Android dependencies, so every format case runs on the JVM without an emulator. That's how the format handling gets tested at all.
 
-15 个用例覆盖：Excel 序列号还原、GB18030 解码、脏引号容错、中性交易判定、千分位金额、周起始日计算。
+21 cases cover Excel serial timestamps, GB18030 decoding, malformed quotes, neutral-transaction detection, thousands separators, week start calculation, and input limits.
 
-想用真实账单自测，把它们放进 `samples/private/`（已在 .gitignore 里），测试会自动跑一遍。
+To test against your own statements, put them in `samples/private/` (already in .gitignore) and the suite picks them up.
 
----
-
-## 结构
+## Layout
 
 ```
 app/src/main/java/app/zhouzhang/
-  core/          解析层，纯 Kotlin，零 Android 依赖
-    Csv.kt       容错 CSV 读取（脏引号不吞行）
-    Xlsx.kt      极简 xlsx 读取，不引 POI
-    ZipUtil.kt   zip4j 流式解密，不落盘
-    Parser.kt    格式识别 + 字段归一 + 清洗
-  data/          SQLite
-  ui/            Compose 主题
-design/icon/     图标源文件与 Android 资源
-tools/           图标生成、样本生成（可复现）
-samples/         合成测试样本，不含任何真实账单
+  core/          parsing, plain Kotlin, no Android dependencies
+    Csv.kt       lenient CSV reader (stray quotes don't swallow rows)
+    Xlsx.kt      minimal xlsx reader, no POI
+    ZipUtil.kt   zip4j streaming decryption, nothing written to disk
+    Parser.kt    format detection, field normalisation, cleaning
+    Limits.kt    input size and row/column caps
+  data/          SQLite and key storage
+  mail/          IMAP client
+  ui/            Compose theme
+design/icon/     icon sources and Android resources
+tools/           icon and sample generators (reproducible)
+samples/         synthetic test data, no real bills
 ```
 
----
+## Roadmap
 
-## 路线图
+- [x] Parser core (WeChat xlsx/csv, both Alipay formats, encrypted zip)
+- [x] Week and month views
+- [x] SQLCipher encryption, including migration from a plaintext database
+- [x] Screenshot blocking
+- ~~App lock (biometric / PIN)~~ dropped
+- [x] Category rule learning: categorise an uncategorised merchant and keep the rule
+- [ ] Export (redacted CSV)
+- [ ] Transaction search and filters
+- [ ] Bank statements
 
-- [x] 解析内核（微信 xlsx/csv、支付宝新旧两版、加密 zip）
-- [x] 周视图、月视图
-- [x] SQLCipher 加密（含明文库自动迁移）
-- [x] 禁止截屏（截图、录屏、任务缩略图均为空白）
-- ~~应用锁（生物识别 / PIN）~~ 已废弃，不做
-- [x] 分类规则学习：未分类商户一键归类并沉淀规则
-- [ ] 导出（脱敏 CSV）
-- [ ] 明细搜索与筛选
-- [ ] 银行账单
+## Credits
 
----
+The design borrows ideas from these projects. The code is an independent implementation; see [NOTICE](NOTICE).
 
-## 致谢
-
-思路借鉴了这些项目，代码独立实现，详见 [NOTICE](NOTICE)：
-
-- [vogo/aliwepaystat](https://github.com/vogo/aliwepaystat) — 字段归一、内部流转判定
-- [yann0917/alipay-wechat-merge](https://github.com/yann0917/alipay-wechat-merge) — 脏引号容错的教训
-- [bingchuH/Bookkeeping](https://github.com/bingchuH/Bookkeeping) — 规则沉淀
-- [mayswind/ezbookkeeping](https://github.com/mayswind/ezbookkeeping) — 转账语义建模
-
----
+- [vogo/aliwepaystat](https://github.com/vogo/aliwepaystat): field normalisation, internal transfer detection
+- [yann0917/alipay-wechat-merge](https://github.com/yann0917/alipay-wechat-merge): what stray quotes do to a CSV parser
+- [bingchuH/Bookkeeping](https://github.com/bingchuH/Bookkeeping): turning corrections into rules
+- [mayswind/ezbookkeeping](https://github.com/mayswind/ezbookkeeping): modelling transfers
 
 ## License
 
 [GPL-3.0](LICENSE)
 
-选它的理由：数据不出设备这个承诺，只能靠可审计来证明。GPL 保证分发出去的修改版也必须开源——防止有人拿它改一版塞进统计 SDK，再用同一套话术骗人。
+The claim is that data stays on the device, and a claim like that only counts if the code can be audited. GPL keeps distributed modifications open, so nobody can add an analytics SDK, ship it, and tell the same story.
