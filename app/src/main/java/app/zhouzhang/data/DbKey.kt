@@ -23,7 +23,10 @@ object DbKey {
 
         if (stored == null) {
             val raw = ByteArray(32).also { java.security.SecureRandom().nextBytes(it) }
-            prefs.edit().putString(PREF_KEY, KeystoreCipher.wrap(raw)).apply()
+            // 必须同步落盘（commit，不是 apply）：返回之后调用方就会拿它建库。
+            // 若此时进程被杀而写入还没落地，口令就永久丢了——那个库再也打不开。
+            val ok = prefs.edit().putString(PREF_KEY, KeystoreCipher.wrap(raw)).commit()
+            if (!ok) throw DbKeyException("数据库口令写入失败，已中止创建数据库")
             return raw
         }
 

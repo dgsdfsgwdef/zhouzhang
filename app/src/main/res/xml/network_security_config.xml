@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  只允许 TLS，且只信任系统根证书。
+
+  为什么要显式写：targetSdk 28 之后明文默认被禁，但那是「默认」，不是「声明」。
+  一旦以后加了 WebView、下载或别的基础库，默认值可能被绕过。写成配置就没这个余地。
+
+  不信任用户安装的 CA（<certificates src="user" />）：这是防抓包的常规做法，
+  也让「装个根证书就能解 IMAP 授权码」这条路走不通。
+  代价是：需要抓包调试时得临时改这里，这是有意的取舍。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

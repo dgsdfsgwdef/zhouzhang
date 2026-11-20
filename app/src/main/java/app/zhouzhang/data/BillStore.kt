@@ -346,12 +346,23 @@ class BillStore(private val context: Context) {
             "INSERT INTO category_rule(keyword, category, created_at) VALUES(?,?,?)",
             arrayOf(keyword, category, System.currentTimeMillis())
         )
+        // 商户名里可能带 % 或 _（如「100% 鲜榨」），不转义的话会变成通配符，
+        // 一条规则就把半个账本改掉。ESCAPE 让 LIKE 按字面量匹配。
+        val pattern = likePattern(keyword)
         return db.update(
             "bill",
             ContentValues().apply { put("category", category) },
-            "counterparty LIKE ? OR item LIKE ?",
-            arrayOf("%$keyword%", "%$keyword%")
+            "counterparty LIKE ? ESCAPE '\\' OR item LIKE ? ESCAPE '\\'",
+            arrayOf(pattern, pattern)
         )
+    }
+
+    private fun likePattern(raw: String): String {
+        val escaped = raw
+            .replace("\\", "\\\\")
+            .replace("%", "\\%")
+            .replace("_", "\\_")
+        return "%$escaped%"
     }
 
     fun deleteRule(id: Long) {

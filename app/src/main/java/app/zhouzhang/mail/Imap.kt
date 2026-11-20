@@ -1,6 +1,7 @@
 package app.zhouzhang.mail
 
 import android.content.Context
+import app.zhouzhang.core.readCapped
 import app.zhouzhang.data.SecretBox
 import java.util.Date
 import java.util.Properties
@@ -45,12 +46,27 @@ object ImapClient {
 
     private const val MAX_BYTES = 20 * 1024 * 1024
 
+    /**
+     * 只允许 TLS 1.2 / 1.3。
+     *
+     * 不写死 "TLSv1.2 TLSv1.3"：旧设备（API 26–28）的 Conscrypt 未必支持 1.3，
+     * 把不支持的协议塞进 SSLParameters 会让握手直接失败。所以按本机实际能力取交集。
+     */
+    private val TLS_PROTOCOLS: String by lazy {
+        val supported = runCatching {
+            javax.net.ssl.SSLContext.getDefault().supportedSSLParameters.protocols.toSet()
+        }.getOrDefault(emptySet())
+        val allowed = listOf("TLSv1.3", "TLSv1.2").filter { it in supported }
+        if (allowed.isEmpty()) "TLSv1.2" else allowed.joinToString(" ")
+    }
+
     private fun props(account: MailAccount) = Properties().apply {
         put("mail.store.protocol", "imaps")
         put("mail.imaps.host", account.host)
         put("mail.imaps.port", account.port.toString())
         put("mail.imaps.ssl.enable", "true")
         put("mail.imaps.ssl.checkserveridentity", "true")
+        put("mail.imaps.ssl.protocols", TLS_PROTOCOLS)
         put("mail.imaps.connectiontimeout", "15000")
         put("mail.imaps.timeout", "20000")
         put("mail.imaps.writetimeout", "15000")
@@ -137,8 +153,11 @@ object ImapClient {
         val size = runCatching { part.size }.getOrDefault(-1)
         if (size > MAX_BYTES) return
 
-        val bytes = runCatching { part.inputStream.use { it.readBytes() } }.getOrNull() ?: return
-        if (bytes.isEmpty() || bytes.size > MAX_BYTES) return
+        // 声明的 size 不可信（可能是 -1，也可能撒谎），真正读取时按字节数硬限
+        val bytes = runCatching {
+            part.inputStream.use { it.readCapped(MAX_BYTES.toLong()) }
+        }.getOrNull() ?: return
+        if (bytes.isEmpty()) return
 
         out.add(MailAttachment(name, bytes, subject, at))
     }

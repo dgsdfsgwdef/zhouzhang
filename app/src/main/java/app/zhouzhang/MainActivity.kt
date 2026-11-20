@@ -2,12 +2,15 @@ package app.zhouzhang
 
 import android.content.Context
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.OpenableColumns
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -36,8 +39,10 @@ import androidx.compose.ui.unit.sp
 import app.zhouzhang.core.Bill
 import app.zhouzhang.core.Direction
 import app.zhouzhang.core.FlowType
+import app.zhouzhang.core.Limits
 import app.zhouzhang.core.Parser
 import app.zhouzhang.core.Week
+import app.zhouzhang.core.readCapped
 import app.zhouzhang.data.BillStore
 import app.zhouzhang.data.CategoryRule
 import app.zhouzhang.data.CategorySum
@@ -52,6 +57,7 @@ import app.zhouzhang.mail.MailAttachment
 import app.zhouzhang.mail.MailConfig
 import app.zhouzhang.mail.MailPresets
 import app.zhouzhang.ui.Ink
+import app.zhouzhang.ui.ZType
 import app.zhouzhang.ui.ZhouTheme
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -67,6 +73,18 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         store = BillStore(applicationContext)
+
+        // 禁止截屏，同时让最近任务里的缩略图变成空白。
+        // 这不是应用锁（应用锁已废弃），只是不让账单金额从系统层面漏出去：
+        // 截图、录屏、任务切换缩略图都不再缓存本页内容。
+        window.setFlags(
+            WindowManager.LayoutParams.FLAG_SECURE,
+            WindowManager.LayoutParams.FLAG_SECURE
+        )
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            setRecentsScreenshotEnabled(false)
+        }
+
         setContent {
             ZhouTheme { HomeScreen(store) }
         }
@@ -75,10 +93,12 @@ class MainActivity : ComponentActivity() {
 
 enum class Mode(val label: String) { WEEK("周"), MONTH("月") }
 
-fun money(cents: Long): String {
-    val neg = cents < 0
-    val abs = if (neg) -cents else cents
-    return (if (neg) "-" else "") + "¥" + "%,d.%02d".format(abs / 100, abs % 100)
+fun money(cents: Long): String = (if (cents < 0) "-" else "") + "¥" + amountDigits(cents)
+
+/** 不带货币符号的金额。界面要把 ¥ 单独排版时用它，符号才能降一档 */
+fun amountDigits(cents: Long): String {
+    val abs = kotlin.math.abs(cents)
+    return "%,d.%02d".format(abs / 100, abs % 100)
 }
 
 fun weekdayLabel(d: LocalDate): String = when (d.dayOfWeek.value) {
@@ -328,7 +348,7 @@ fun HomeScreen(store: BillStore) {
                 ExtendedFloatingActionButton(
                     onClick = { picker.launch(mimeTypes) },
                     containerColor = Ink.Text,
-                    contentColor = Color.White,
+                    contentColor = Ink.Bg,
                     icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
                     text = { Text(if (busy) "解析中…" else "导入账单") },
                 )
@@ -360,10 +380,10 @@ fun HomeScreen(store: BillStore) {
                     ModeSwitch(mode) { mode = it }
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         TextButton(onClick = { showRules = true }) {
-                            Text("分类整理", fontSize = 13.sp, color = Ink.Muted)
+                            Text("分类整理", style = ZType.secondary, color = Ink.Text2)
                         }
                         IconButton(onClick = { showSettings = true }) {
-                            Icon(Icons.Rounded.Settings, "设置", tint = Ink.Muted)
+                            Icon(Icons.Rounded.Settings, "设置", tint = Ink.Text2)
                         }
                     }
                 }
@@ -373,9 +393,9 @@ fun HomeScreen(store: BillStore) {
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically,
                     ) {
-                        Text("上次导入新增 $undoCount 条", fontSize = 12.sp, color = Ink.Muted)
+                        Text("上次导入新增 $undoCount 条", style = ZType.caption, color = Ink.Text2)
                         TextButton(onClick = { doUndo() }) {
-                            Text("撤销", fontSize = 13.sp, color = Ink.Amber)
+                            Text("撤销", style = ZType.secondary, color = Ink.Accent)
                         }
                     }
                 }
@@ -392,18 +412,18 @@ fun HomeScreen(store: BillStore) {
                         onNext = { weekStart = weekStart.plusWeeks(1) },
                     )
                     Spacer(Modifier.height(10.dp))
+                    val weekTotal = weekSum?.totalCents ?: 0
+                    val weekCount = weekSum?.count ?: 0
+                    val weekDelta = if (prevSame > 0 && weekTotal > 0) {
+                        (weekTotal - prevSame) * 100.0 / prevSame
+                    } else {
+                        null
+                    }
                     AmountBlock(
-                        total = weekSum?.totalCents ?: 0,
-                        subtitle = buildString {
-                            val c = weekSum?.count ?: 0
-                            append(if (c > 0) "$c 笔消费" else "这周没有记录")
-                            if (prevSame > 0 && (weekSum?.totalCents ?: 0) > 0) {
-                                val diff = (weekSum!!.totalCents - prevSame) * 100.0 / prevSame
-                                append(" · 比上周同期 ")
-                                append(if (diff >= 0) "↑" else "↓")
-                                append("%.0f%%".format(kotlin.math.abs(diff)))
-                            }
-                        },
+                        total = weekTotal,
+                        meta = if (weekCount > 0) "$weekCount 笔消费" else "这周没有记录",
+                        deltaPct = weekDelta?.let { kotlin.math.abs(it).toInt() },
+                        deltaUp = (weekDelta ?: 0.0) >= 0,
                     )
                 }
 
@@ -412,18 +432,18 @@ fun HomeScreen(store: BillStore) {
                 item {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = Ink.Surface),
-                        shape = RoundedCornerShape(18.dp),
-                        elevation = CardDefaults.cardElevation(0.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, Ink.Border),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column(Modifier.padding(18.dp)) {
                             WeekBars(weekSum?.days ?: emptyList(), weekStart)
                             Spacer(Modifier.height(18.dp))
-                            HorizontalDivider(color = Ink.Divider)
+                            HorizontalDivider(color = Ink.Hairline)
                             Spacer(Modifier.height(14.dp))
                             val cats = weekSum?.categories.orEmpty()
                             if (cats.isEmpty()) {
-                                Text("这周还没有消费记录", fontSize = 13.sp, color = Ink.Muted)
+                                Text("这周还没有消费记录", style = ZType.secondary, color = Ink.Text2)
                             } else {
                                 cats.take(6).forEach { c ->
                                     CategoryRow(c.category, c.cents, weekSum!!.totalCents)
@@ -436,7 +456,7 @@ fun HomeScreen(store: BillStore) {
                 item { Spacer(Modifier.height(26.dp)) }
 
                 item {
-                    Text("明细", fontSize = 13.sp, color = Ink.Muted)
+                    Text("明细", style = ZType.secondary, color = Ink.Text2)
                     Spacer(Modifier.height(10.dp))
                 }
 
@@ -445,8 +465,8 @@ fun HomeScreen(store: BillStore) {
                         Text(
                             "点右下角导入微信或支付宝导出的账单。\n" +
                                     "支持 CSV、XLSX，以及带密码的 zip。",
-                            fontSize = 13.sp,
-                            color = Ink.Muted,
+                            style = ZType.secondary,
+                            color = Ink.Text2,
                             lineHeight = 20.sp,
                         )
                     }
@@ -462,25 +482,26 @@ fun HomeScreen(store: BillStore) {
                         canNext = month.isBefore(thisMonth),
                         onPrev = { month = month.minusMonths(1) },
                         onNext = { month = month.plusMonths(1) },
+                        prevLabel = "上个月",
+                        nextLabel = "下个月",
                     )
                     Spacer(Modifier.height(10.dp))
                     val total = monthSum?.totalCents ?: 0
                     val cnt = monthSum?.count ?: 0
                     // 当月只过了几天就只除以几天，否则日均会被低估
                     val dayCount = if (month == thisMonth) today.dayOfMonth else month.lengthOfMonth()
+                    val prevMonth = monthSum?.prevTotalCents ?: 0
+                    val monthDelta = if (prevMonth > 0 && total > 0) {
+                        (total - prevMonth) * 100.0 / prevMonth
+                    } else {
+                        null
+                    }
                     AmountBlock(
                         total = total,
-                        subtitle = buildString {
-                            append(if (cnt > 0) "$cnt 笔消费" else "本月没有记录")
-                            if (cnt > 0) append(" · 日均 ").append(money(total / dayCount))
-                            val prev = monthSum?.prevTotalCents ?: 0
-                            if (prev > 0 && total > 0) {
-                                val diff = (total - prev) * 100.0 / prev
-                                append(" · 比上月 ")
-                                append(if (diff >= 0) "↑" else "↓")
-                                append("%.0f%%".format(kotlin.math.abs(diff)))
-                            }
-                        },
+                        meta = if (cnt > 0) "$cnt 笔 · 日均 ${money(total / dayCount)}" else "本月没有记录",
+                        deltaPct = monthDelta?.let { kotlin.math.abs(it).toInt() },
+                        deltaUp = (monthDelta ?: 0.0) >= 0,
+                        deltaLabel = "比上月",
                     )
                 }
 
@@ -489,16 +510,16 @@ fun HomeScreen(store: BillStore) {
                 item {
                     Card(
                         colors = CardDefaults.cardColors(containerColor = Ink.Surface),
-                        shape = RoundedCornerShape(18.dp),
-                        elevation = CardDefaults.cardElevation(0.dp),
+                        shape = RoundedCornerShape(14.dp),
+                        border = BorderStroke(1.dp, Ink.Border),
                         modifier = Modifier.fillMaxWidth(),
                     ) {
                         Column(Modifier.padding(18.dp)) {
-                            Text("分类占比", fontSize = 13.sp, color = Ink.Muted)
+                            Text("分类占比", style = ZType.secondary, color = Ink.Text2)
                             Spacer(Modifier.height(10.dp))
                             val cats = monthSum?.categories.orEmpty()
                             if (cats.isEmpty()) {
-                                Text("本月还没有消费记录", fontSize = 13.sp, color = Ink.Muted)
+                                Text("本月还没有消费记录", style = ZType.secondary, color = Ink.Text2)
                             } else {
                                 cats.forEach { c ->
                                     CategoryRow(c.category, c.cents, monthSum!!.totalCents)
@@ -515,12 +536,12 @@ fun HomeScreen(store: BillStore) {
                     if (merchants.isNotEmpty()) {
                         Card(
                             colors = CardDefaults.cardColors(containerColor = Ink.Surface),
-                            shape = RoundedCornerShape(18.dp),
-                            elevation = CardDefaults.cardElevation(0.dp),
+                            shape = RoundedCornerShape(14.dp),
+                            border = BorderStroke(1.dp, Ink.Border),
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Column(Modifier.padding(18.dp)) {
-                                Text("花得最多的商户", fontSize = 13.sp, color = Ink.Muted)
+                                Text("花得最多的商户", style = ZType.secondary, color = Ink.Text2)
                                 Spacer(Modifier.height(6.dp))
                                 merchants.forEachIndexed { i, m ->
                                     MerchantRow(i + 1, m)
@@ -538,8 +559,8 @@ fun HomeScreen(store: BillStore) {
         AlertDialog(
             onDismissRequest = { message = null },
             confirmButton = { TextButton(onClick = { message = null }) { Text("好") } },
-            title = { Text("导入结果", fontSize = 16.sp) },
-            text = { Text(message!!, fontSize = 14.sp, lineHeight = 21.sp) },
+            title = { Text("导入结果", style = ZType.title) },
+            text = { Text(message!!, style = ZType.bodySmall, lineHeight = 21.sp) },
             containerColor = Ink.Surface,
         )
     }
@@ -547,12 +568,12 @@ fun HomeScreen(store: BillStore) {
     if (askPassword) {
         AlertDialog(
             onDismissRequest = { askPassword = false },
-            title = { Text("需要解压密码", fontSize = 16.sp) },
+            title = { Text("需要解压密码", style = ZType.title) },
             text = {
                 Column {
                     Text(
                         "支付宝的交易明细压缩包是加密的。密码通常是身份证后 6 位或手机号后 6 位。",
-                        fontSize = 13.sp,
+                        style = ZType.secondary,
                         lineHeight = 20.sp,
                     )
                     Spacer(Modifier.height(12.dp))
@@ -564,7 +585,7 @@ fun HomeScreen(store: BillStore) {
                     )
                     if (passwordError != null) {
                         Spacer(Modifier.height(6.dp))
-                        Text(passwordError!!, fontSize = 12.sp, color = MaterialTheme.colorScheme.error)
+                        Text(passwordError!!, style = ZType.caption, color = MaterialTheme.colorScheme.error)
                     }
                 }
             },
@@ -642,17 +663,17 @@ fun Onboarding(modifier: Modifier = Modifier, busy: Boolean, onImport: () -> Uni
             .verticalScroll(rememberScrollState()),
     ) {
         Spacer(Modifier.height(56.dp))
-        Text("周账", fontSize = 26.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+        Text("周账", style = ZType.displaySmall, color = Ink.Text)
         Spacer(Modifier.height(8.dp))
         Text(
             "导入微信和支付宝的官方账单，看每周花了多少、花在哪。数据只存在这台手机上。",
-            fontSize = 14.sp,
+            style = ZType.bodySmall,
             lineHeight = 22.sp,
-            color = Ink.Muted,
+            color = Ink.Text2,
         )
 
         Spacer(Modifier.height(34.dp))
-        Text("账单从哪来", fontSize = 13.sp, color = Ink.Muted)
+        Text("账单从哪来", style = ZType.secondary, color = Ink.Text2)
         Spacer(Modifier.height(12.dp))
 
         StepCard(
@@ -676,17 +697,17 @@ fun Onboarding(modifier: Modifier = Modifier, busy: Boolean, onImport: () -> Uni
                 .height(50.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = Ink.Text,
-                contentColor = Color.White,
+                contentColor = Ink.Bg,
             ),
             shape = RoundedCornerShape(13.dp),
         ) {
-            Text(if (busy) "解析中…" else "导入账单", fontSize = 15.sp)
+            Text(if (busy) "解析中…" else "导入账单", style = ZType.body)
         }
         Spacer(Modifier.height(12.dp))
         Text(
             "支持 CSV、XLSX 和加密 zip，可以一次选多个文件。",
-            fontSize = 12.sp,
-            color = Ink.Muted,
+            style = ZType.caption,
+            color = Ink.Text2,
         )
         Spacer(Modifier.height(40.dp))
     }
@@ -697,15 +718,15 @@ fun StepCard(platform: String, path: String, note: String) {
     Card(
         colors = CardDefaults.cardColors(containerColor = Ink.Surface),
         shape = RoundedCornerShape(14.dp),
-        elevation = CardDefaults.cardElevation(0.dp),
+        border = BorderStroke(1.dp, Ink.Border),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(16.dp)) {
-            Text(platform, fontSize = 14.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+            Text(platform, style = ZType.bodySmall, fontWeight = FontWeight.Medium, color = Ink.Text)
             Spacer(Modifier.height(6.dp))
-            Text(path, fontSize = 13.sp, lineHeight = 20.sp, color = Ink.Text)
+            Text(path, style = ZType.secondary, lineHeight = 20.sp, color = Ink.Text)
             Spacer(Modifier.height(6.dp))
-            Text(note, fontSize = 12.sp, lineHeight = 18.sp, color = Ink.Muted)
+            Text(note, style = ZType.caption, lineHeight = 18.sp, color = Ink.Text2)
         }
     }
 }
@@ -739,25 +760,25 @@ fun RulesSheet(store: BillStore, onChanged: () -> Unit) {
             .padding(horizontal = 20.dp)
             .padding(bottom = 28.dp),
     ) {
-        Text("分类整理", fontSize = 17.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+        Text("分类整理", style = ZType.title, fontWeight = FontWeight.Medium, color = Ink.Text)
         Spacer(Modifier.height(4.dp))
         Text(
             "给商户指定一次分类，之后同类交易自动套用。",
-            fontSize = 12.sp,
-            color = Ink.Muted,
+            style = ZType.caption,
+            color = Ink.Text2,
         )
 
         if (note != null) {
             Spacer(Modifier.height(10.dp))
-            Text(note!!, fontSize = 12.sp, color = Ink.Amber)
+            Text(note!!, style = ZType.caption, color = Ink.Accent)
         }
 
         Spacer(Modifier.height(18.dp))
-        Text("待归类", fontSize = 13.sp, color = Ink.Muted)
+        Text("待归类", style = ZType.secondary, color = Ink.Text2)
         Spacer(Modifier.height(8.dp))
 
         if (merchants.isEmpty()) {
-            Text("没有未分类的支出了", fontSize = 13.sp, color = Ink.Muted)
+            Text("没有未分类的支出了", style = ZType.secondary, color = Ink.Text2)
         } else {
             merchants.forEach { m ->
                 Row(
@@ -769,24 +790,24 @@ fun RulesSheet(store: BillStore, onChanged: () -> Unit) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text(m.name, fontSize = 14.sp, color = Ink.Text, maxLines = 1)
+                        Text(m.name, style = ZType.bodySmall, color = Ink.Text, maxLines = 1)
                         Spacer(Modifier.height(2.dp))
-                        Text("${m.count} 笔", fontSize = 11.sp, color = Ink.Muted)
+                        Text("${m.count} 笔", style = ZType.micro, color = Ink.Text2)
                     }
-                    Text(money(m.cents), fontSize = 14.sp, color = Ink.Text)
+                    Text(money(m.cents), style = ZType.bodySmall, color = Ink.Text)
                     Spacer(Modifier.width(8.dp))
-                    Text("归类 ›", fontSize = 12.sp, color = Ink.Amber)
+                    Text("归类 ›", style = ZType.caption, color = Ink.Accent)
                 }
-                HorizontalDivider(color = Ink.Divider)
+                HorizontalDivider(color = Ink.Hairline)
             }
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("已生效的规则", fontSize = 13.sp, color = Ink.Muted)
+        Text("已生效的规则", style = ZType.secondary, color = Ink.Text2)
         Spacer(Modifier.height(8.dp))
 
         if (rules.isEmpty()) {
-            Text("还没有自定义规则", fontSize = 13.sp, color = Ink.Muted)
+            Text("还没有自定义规则", style = ZType.secondary, color = Ink.Text2)
         } else {
             rules.forEach { r ->
                 Row(
@@ -797,12 +818,12 @@ fun RulesSheet(store: BillStore, onChanged: () -> Unit) {
                 ) {
                     Text(
                         r.keyword,
-                        fontSize = 13.sp,
+                        style = ZType.secondary,
                         color = Ink.Text,
                         maxLines = 1,
                         modifier = Modifier.weight(1f),
                     )
-                    Text(r.category, fontSize = 13.sp, color = Ink.Muted)
+                    Text(r.category, style = ZType.secondary, color = Ink.Text2)
                     Spacer(Modifier.width(12.dp))
                     TextButton(
                         onClick = {
@@ -815,10 +836,10 @@ fun RulesSheet(store: BillStore, onChanged: () -> Unit) {
                         },
                         contentPadding = PaddingValues(0.dp),
                     ) {
-                        Text("删除", fontSize = 12.sp, color = Ink.Muted)
+                        Text("删除", style = ZType.caption, color = Ink.Text2)
                     }
                 }
-                HorizontalDivider(color = Ink.Divider)
+                HorizontalDivider(color = Ink.Hairline)
             }
         }
         Spacer(Modifier.height(20.dp))
@@ -827,13 +848,13 @@ fun RulesSheet(store: BillStore, onChanged: () -> Unit) {
     picking?.let { m ->
         AlertDialog(
             onDismissRequest = { picking = null },
-            title = { Text("「${m.name}」归到哪一类", fontSize = 15.sp) },
+            title = { Text("「${m.name}」归到哪一类", style = ZType.body) },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     CATEGORIES.forEach { c ->
                         Text(
                             c,
-                            fontSize = 15.sp,
+                            style = ZType.body,
                             color = Ink.Text,
                             modifier = Modifier
                                 .fillMaxWidth()
@@ -912,10 +933,10 @@ fun SettingsSheet(
             .padding(horizontal = 20.dp)
             .padding(bottom = 28.dp),
     ) {
-        Text("设置", fontSize = 17.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+        Text("设置", style = ZType.title, fontWeight = FontWeight.Medium, color = Ink.Text)
 
         Spacer(Modifier.height(18.dp))
-        Text("每周从哪天开始", fontSize = 13.sp, color = Ink.Muted)
+        Text("每周从哪天开始", style = ZType.secondary, color = Ink.Text2)
         Spacer(Modifier.height(8.dp))
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             WEEK_DAY_LABELS.forEachIndexed { index, label ->
@@ -925,30 +946,30 @@ fun SettingsSheet(
                     Modifier
                         .weight(1f)
                         .clip(RoundedCornerShape(9.dp))
-                        .background(if (selected) Ink.Text else Ink.Bg)
+                        .background(if (selected) Ink.Text else Ink.Sunk)
                         .clickable { onWeekStartChanged(day) }
-                        .padding(vertical = 9.dp),
+                        .padding(vertical = 13.dp),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
                         label,
-                        fontSize = 12.sp,
-                        color = if (selected) Color.White else Ink.Muted,
+                        style = ZType.caption,
+                        color = if (selected) Ink.Bg else Ink.Text2,
                     )
                 }
             }
         }
         Spacer(Modifier.height(6.dp))
-        Text("改完之后历史数据会重新分周。", fontSize = 11.sp, color = Ink.Muted)
+        Text("改完之后历史数据会重新分周。", style = ZType.micro, color = Ink.Text2)
 
         Spacer(Modifier.height(26.dp))
-        Text("邮箱收单", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+        Text("邮箱收单", style = ZType.body, fontWeight = FontWeight.Medium, color = Ink.Text)
         Spacer(Modifier.height(4.dp))
         Text(
             "绑定后，账单邮件到了点一下就能导入，不用再翻文件夹。填的是 IMAP 授权码，不是邮箱登录密码。",
-            fontSize = 12.sp,
+            style = ZType.caption,
             lineHeight = 18.sp,
-            color = Ink.Muted,
+            color = Ink.Text2,
         )
 
         Spacer(Modifier.height(16.dp))
@@ -959,7 +980,7 @@ fun SettingsSheet(
                         host = h
                         port = p.toString()
                     },
-                    label = { Text(name, fontSize = 11.sp) },
+                    label = { Text(name, style = ZType.micro) },
                 )
             }
         }
@@ -1021,7 +1042,7 @@ fun SettingsSheet(
                     }
                 },
                 enabled = !working && user.isNotBlank() && password.isNotBlank(),
-            ) { Text("测试连接", fontSize = 13.sp) }
+            ) { Text("测试连接", style = ZType.secondary) }
 
             Button(
                 onClick = {
@@ -1036,14 +1057,14 @@ fun SettingsSheet(
                 enabled = user.isNotBlank() && password.isNotBlank(),
                 colors = ButtonDefaults.buttonColors(
                     containerColor = Ink.Text,
-                    contentColor = Color.White,
+                    contentColor = Ink.Bg,
                 ),
-            ) { Text("保存", fontSize = 13.sp) }
+            ) { Text("保存", style = ZType.secondary) }
         }
 
         if (status != null) {
             Spacer(Modifier.height(8.dp))
-            Text(status!!, fontSize = 12.sp, color = Ink.Muted)
+            Text(status!!, style = ZType.caption, color = Ink.Text2)
         }
 
         if (configured) {
@@ -1053,20 +1074,20 @@ fun SettingsSheet(
                 enabled = !working,
                 modifier = Modifier.fillMaxWidth().height(48.dp),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Ink.Amber,
-                    contentColor = Color.White,
+                    containerColor = Ink.Text,
+                    contentColor = Ink.Bg,
                 ),
                 shape = RoundedCornerShape(12.dp),
-            ) { Text("立即收信", fontSize = 15.sp) }
+            ) { Text("立即收信", style = ZType.titleSmall) }
         }
 
         Spacer(Modifier.height(24.dp))
-        Text("账单解压码", fontSize = 13.sp, color = Ink.Muted)
+        Text("账单解压码", style = ZType.secondary, color = Ink.Text2)
         Spacer(Modifier.height(6.dp))
         Text(
             "支付宝的交易明细 zip 是加密的，存一次就不用每次输入。",
-            fontSize = 12.sp,
-            color = Ink.Muted,
+            style = ZType.caption,
+            color = Ink.Text2,
         )
         Spacer(Modifier.height(10.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -1089,7 +1110,7 @@ fun SettingsSheet(
                         status = "已保存解压码"
                     }
                 }
-            ) { Text("保存", fontSize = 13.sp, color = Ink.Amber) }
+            ) { Text("保存", style = ZType.secondary, color = Ink.Accent) }
         }
 
         if (configured) {
@@ -1102,7 +1123,7 @@ fun SettingsSheet(
                     status = "已解除绑定"
                     onChanged()
                 }
-            ) { Text("解除邮箱绑定", fontSize = 13.sp, color = Ink.Muted) }
+            ) { Text("解除邮箱绑定", style = ZType.secondary, color = Ink.Text2) }
         }
 
         Spacer(Modifier.height(16.dp))
@@ -1114,7 +1135,7 @@ fun ModeSwitch(mode: Mode, onChange: (Mode) -> Unit) {
     Row(
         Modifier
             .clip(RoundedCornerShape(11.dp))
-            .background(Ink.Surface)
+            .background(Ink.Sunk)
             .padding(3.dp)
     ) {
         Mode.entries.forEach { m ->
@@ -1124,12 +1145,12 @@ fun ModeSwitch(mode: Mode, onChange: (Mode) -> Unit) {
                     .clip(RoundedCornerShape(9.dp))
                     .background(if (selected) Ink.Text else Color.Transparent)
                     .clickable { onChange(m) }
-                    .padding(horizontal = 20.dp, vertical = 7.dp)
+                    .padding(horizontal = 20.dp, vertical = 10.dp)
             ) {
                 Text(
                     m.label,
-                    fontSize = 13.sp,
-                    color = if (selected) Color.White else Ink.Muted,
+                    style = ZType.secondary,
+                    color = if (selected) Ink.Bg else Ink.Text2,
                 )
             }
         }
@@ -1143,40 +1164,97 @@ fun PeriodBar(
     canNext: Boolean,
     onPrev: () -> Unit,
     onNext: () -> Unit,
+    prevLabel: String = "上一周",
+    nextLabel: String = "下一周",
 ) {
     Row(
         Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        ArrowButton(Icons.Rounded.ChevronLeft, canPrev, onPrev)
-        Text(label, fontSize = 14.sp, color = Ink.Muted)
-        ArrowButton(Icons.Rounded.ChevronRight, canNext, onNext)
+        ArrowButton(Icons.Rounded.ChevronLeft, canPrev, onPrev, prevLabel)
+        Text(label, style = ZType.bodySmall, color = Ink.Text2)
+        ArrowButton(Icons.Rounded.ChevronRight, canNext, onNext, nextLabel)
     }
 }
 
 @Composable
-fun ArrowButton(icon: androidx.compose.ui.graphics.vector.ImageVector, enabled: Boolean, onClick: () -> Unit) {
+fun ArrowButton(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    label: String,
+) {
     IconButton(onClick = onClick, enabled = enabled) {
         Icon(
             icon,
-            contentDescription = null,
-            tint = if (enabled) Ink.Text else Ink.Divider,
+            contentDescription = label,
+            tint = if (enabled) Ink.Text else Ink.Hairline,
         )
     }
 }
 
+/**
+ * 本周金额。整屏唯一的视觉重心。
+ *
+ * ¥ 比数字小一档并基线对齐——符号是单位，不该和数值抢注意力；
+ * 数字走 ZType.display（内含 tnum），左右翻周时不会横向抖动。
+ * 环比单独成 chip 而不是拼进字符串，涨跌才能上色。
+ */
 @Composable
-fun AmountBlock(total: Long, subtitle: String) {
+fun AmountBlock(
+    total: Long,
+    meta: String,
+    deltaPct: Int? = null,
+    deltaUp: Boolean = true,
+    deltaLabel: String = "比上周同期",
+) {
     Column {
-        Text(
-            money(total),
-            fontSize = 42.sp,
-            fontWeight = FontWeight.Medium,
-            color = Ink.Text,
-        )
-        Spacer(Modifier.height(4.dp))
-        Text(subtitle, fontSize = 13.sp, color = Ink.Muted)
+        Row {
+            // 符号与数字共用一条基线，比手工调 padding 稳
+            Text(
+                "¥",
+                style = ZType.secondary,
+                color = Ink.Text3,
+                modifier = Modifier.alignByBaseline(),
+            )
+            Text(
+                amountDigits(total),
+                style = ZType.display,
+                color = Ink.Text,
+                modifier = Modifier.alignByBaseline(),
+            )
+        }
+        Spacer(Modifier.height(8.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (deltaPct != null) {
+                DeltaChip(deltaPct, deltaUp)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(
+                if (deltaPct != null) "$deltaLabel · $meta" else meta,
+                style = ZType.caption,
+                color = Ink.Text2,
+            )
+        }
+    }
+}
+
+/** 涨红跌绿。中文语境的肌肉记忆，不需要额外解释 */
+@Composable
+fun DeltaChip(pct: Int, up: Boolean) {
+    val fg = if (up) Ink.Up else Ink.Down
+    val bg = if (up) Ink.UpBg else Ink.DownBg
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(bg)
+            .padding(horizontal = 7.dp, vertical = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(if (up) "↑" else "↓", style = ZType.micro, color = fg)
+        Spacer(Modifier.width(2.dp))
+        Text("$pct%", style = ZType.micro, color = fg)
     }
 }
 
@@ -1189,17 +1267,17 @@ fun MerchantRow(rank: Int, m: CategorySum) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            "$rank", fontSize = 12.sp, color = Ink.Muted,
+            "$rank", style = ZType.caption, color = Ink.Text2,
             modifier = Modifier.width(20.dp),
         )
         Text(
             m.category,
-            fontSize = 14.sp,
+            style = ZType.bodySmall,
             color = Ink.Text,
             maxLines = 1,
             modifier = Modifier.weight(1f),
         )
-        Text(money(m.cents), fontSize = 14.sp, color = Ink.Text)
+        Text(money(m.cents), style = ZType.bodySmall, color = Ink.Text)
     }
 }
 
@@ -1217,7 +1295,7 @@ fun WeekBars(days: List<DaySum>, start: LocalDate) {
             val d = start.plusDays(i.toLong())
             val cents = days.firstOrNull { it.date == d }?.cents ?: 0L
             val ratio = (cents.toFloat() / max).coerceIn(0f, 1f)
-            val h = if (cents == 0L) 3f else (ratio * 92f).coerceAtLeast(8f)
+            val h = if (cents == 0L) 3f else (ratio * 84f).coerceAtLeast(8f)
             Column(
                 Modifier.weight(1f).fillMaxHeight(),
                 verticalArrangement = Arrangement.Bottom,
@@ -1230,8 +1308,8 @@ fun WeekBars(days: List<DaySum>, start: LocalDate) {
                         .clip(RoundedCornerShape(4.dp))
                         .background(
                             when {
-                                d == today -> Ink.Amber
-                                cents == 0L -> Ink.Divider
+                                d == today -> Ink.AccentFill
+                                cents == 0L -> Ink.Hairline
                                 else -> Ink.BarIdle
                             }
                         )
@@ -1239,8 +1317,8 @@ fun WeekBars(days: List<DaySum>, start: LocalDate) {
                 Spacer(Modifier.height(8.dp))
                 Text(
                     weekdayLabel(d),
-                    fontSize = 11.sp,
-                    color = if (d == today) Ink.Amber else Ink.Muted,
+                    style = ZType.micro,
+                    color = if (d == today) Ink.Accent else Ink.Text2,
                 )
             }
         }
@@ -1252,12 +1330,12 @@ fun CategoryRow(name: String, cents: Long, total: Long) {
     val pct = if (total > 0) (cents * 100.0 / total).toInt() else 0
     Column(Modifier.padding(vertical = 7.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(name, fontSize = 14.sp, color = Ink.Text)
+            Text(name, style = ZType.bodySmall, color = Ink.Text)
             Row {
-                Text(money(cents), fontSize = 14.sp, color = Ink.Text)
+                Text(money(cents), style = ZType.bodySmall, color = Ink.Text)
                 Spacer(Modifier.width(10.dp))
                 Text(
-                    "$pct%", fontSize = 13.sp, color = Ink.Muted,
+                    "$pct%", style = ZType.secondary, color = Ink.Text2,
                     modifier = Modifier.width(38.dp), textAlign = TextAlign.End
                 )
             }
@@ -1268,14 +1346,14 @@ fun CategoryRow(name: String, cents: Long, total: Long) {
                 .fillMaxWidth()
                 .height(3.dp)
                 .clip(RoundedCornerShape(2.dp))
-                .background(Ink.Divider)
+                .background(Ink.Hairline)
         ) {
             Box(
                 Modifier
                     .fillMaxWidth((pct.coerceIn(0, 100)) / 100f)
                     .fillMaxHeight()
                     .clip(RoundedCornerShape(2.dp))
-                    .background(Ink.AmberSoft)
+                    .background(Ink.AccentFill)
             )
         }
     }
@@ -1293,8 +1371,8 @@ fun BillRow(b: Bill) {
         Column(Modifier.weight(1f)) {
             Text(
                 b.counterparty.ifBlank { b.item.ifBlank { "—" } },
-                fontSize = 14.sp,
-                color = if (isConsumption) Ink.Text else Ink.Muted,
+                style = ZType.bodySmall,
+                color = if (isConsumption) Ink.Text else Ink.Text2,
                 maxLines = 1,
             )
             Spacer(Modifier.height(3.dp))
@@ -1304,32 +1382,38 @@ fun BillRow(b: Bill) {
                     "%02d:%02d".format(b.txnTime.hour, b.txnTime.minute),
                     if (isConsumption) b.category else b.flowType.label,
                 ),
-                fontSize = 12.sp,
-                color = Ink.Muted,
+                style = ZType.caption,
+                color = Ink.Text2,
             )
         }
         Text(
             (if (b.direction == Direction.INCOME) "+" else "") + money(b.amountCents),
-            fontSize = 14.sp,
+            style = ZType.bodySmall,
             color = when {
-                b.direction == Direction.INCOME -> Ink.Amber
+                b.direction == Direction.INCOME -> Ink.Accent
                 isConsumption -> Ink.Text
-                else -> Ink.Muted
+                else -> Ink.Text2
             },
         )
     }
-    HorizontalDivider(color = Ink.Divider)
+    HorizontalDivider(color = Ink.Hairline)
 }
 
-/** 只负责把文件原样读出来。解压、解码、格式识别全部交给 Parser。 */
+/**
+ * 只负责把文件原样读出来。解压、解码、格式识别全部交给 Parser。
+ *
+ * 选择器不限制 MIME 类型，用户完全可能误选一个几百 MB 的视频。整份读进内存会
+ * 直接 OOM，所以按字节数硬限，超了就报错而不是崩掉。
+ */
 private fun readBytes(ctx: Context, uri: Uri): Pair<ByteArray, String> {
     val name = ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
         val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
         if (i >= 0 && c.moveToFirst()) c.getString(i) else null
     } ?: "账单"
 
-    val raw = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
-        ?: throw IOException("读不到这个文件")
+    val raw = ctx.contentResolver.openInputStream(uri)?.use {
+        it.readCapped(Limits.MAX_INPUT_BYTES)
+    } ?: throw IOException("读不到这个文件")
 
     return raw to name
 }

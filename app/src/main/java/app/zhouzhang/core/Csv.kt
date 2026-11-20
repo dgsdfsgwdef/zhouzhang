@@ -15,42 +15,56 @@ import java.nio.charset.CodingErrorAction
  * 判定规则：
  *  - 只有出现在字段开头（缓冲区为空）的 " 才可能是引号开始
  *  - 引号内遇到 " 时，只有后面紧跟 , 换行 或 文件结尾，才算闭合；否则当普通字符
+ *
+ * 安全边界：CSV 可能是邮件附件，行数与单元格数都要限死，否则一份全是逗号的
+ * 大文件能瞬间造出几千万个空字符串。
  */
 object Csv {
 
-    fun parse(text: String): List<List<String>> {
+    fun parse(text: String): List<List<String>> =
+        parse(text, Limits.MAX_ROWS, Limits.MAX_CELLS, Limits.MAX_CELL_CHARS)
+
+    fun parse(text: String, maxRows: Int, maxCells: Int, maxCellChars: Int): List<List<String>> {
         val rows = ArrayList<List<String>>()
         var row = ArrayList<String>()
         val sb = StringBuilder()
         var inQuotes = false
         var i = 0
+        var cells = 0
         val n = text.length
+
+        fun endCell() {
+            row.add(sb.toString())
+            sb.clear()
+            if (++cells > maxCells) throw InputTooLargeException("单元格数量超过 $maxCells，已中止")
+        }
 
         while (i < n) {
             val c = text[i]
             if (inQuotes) {
                 when {
                     c == '"' && i + 1 < n && text[i + 1] == '"' -> {
-                        sb.append('"'); i++
+                        if (sb.length < maxCellChars) sb.append('"')
+                        i++
                     }
                     c == '"' && (i + 1 >= n || text[i + 1] == ',' ||
                             text[i + 1] == '\n' || text[i + 1] == '\r') -> {
                         inQuotes = false
                     }
-                    else -> sb.append(c)
+                    else -> if (sb.length < maxCellChars) sb.append(c)
                 }
             } else {
                 when {
                     c == '"' && sb.isEmpty() -> inQuotes = true
-                    c == ',' -> {
-                        row.add(sb.toString()); sb.clear()
-                    }
+                    c == ',' -> endCell()
                     c == '\r' -> { /* 忽略，交给 \n 处理 */ }
                     c == '\n' -> {
-                        row.add(sb.toString()); sb.clear()
-                        rows.add(row); row = ArrayList()
+                        endCell()
+                        rows.add(row)
+                        if (rows.size > maxRows) throw InputTooLargeException("行数超过 $maxRows，已中止")
+                        row = ArrayList()
                     }
-                    else -> sb.append(c)
+                    else -> if (sb.length < maxCellChars) sb.append(c)
                 }
             }
             i++
@@ -59,6 +73,7 @@ object Csv {
         if (sb.isNotEmpty() || row.isNotEmpty()) {
             row.add(sb.toString())
             rows.add(row)
+            if (rows.size > maxRows) throw InputTooLargeException("行数超过 $maxRows，已中止")
         }
         return rows
     }

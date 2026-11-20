@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  夜版窗口底色。Compose 内部由 ZhouTheme(isSystemInDarkTheme()) 负责，
+  这里只保证「首帧」和系统栏不闪白 —— 否则冷启动会先亮一下再变黑。
+-->
+<resources>
+    <style name="Theme.Zhouzhang" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#14161A</item>
+        <item name="android:statusBarColor">#14161A</item>
+        <item name="android:navigationBarColor">#14161A</item>
+        <item name="android:windowLightStatusBar">false</item>
+    </style>
+</resources>

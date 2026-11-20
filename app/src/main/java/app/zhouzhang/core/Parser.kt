@@ -66,6 +66,11 @@ object Parser {
     }
 
     fun parse(bytes: ByteArray, sourceFile: String, password: String? = null): ParseResult {
+        // 入口先挡一道：邮件附件和用户选的文件都可能远超一份账单该有的大小
+        if (bytes.size > Limits.MAX_INPUT_BYTES) {
+            return failed("文件超过 ${Limits.MAX_INPUT_BYTES / 1024 / 1024} MB，不是账单文件或已损坏")
+        }
+
         val table: Table = try {
             loadTable(bytes, password)
         } catch (e: NeedPasswordException) {
@@ -74,6 +79,9 @@ object Parser {
                 encoding = "", totalRows = 0, issues = emptyList(),
                 error = e.message, needsPassword = true,
             )
+        } catch (e: InputTooLargeException) {
+            // 压缩炸弹、超大表格都走这里。明确告诉用户是「太大」，不是「密码错」
+            return failed(e.message ?: "文件内容异常")
         }
 
         val rows = table.rows
@@ -147,6 +155,11 @@ object Parser {
 
     private class Table(val rows: List<List<String>>, val encoding: String)
 
+    private fun failed(message: String) = ParseResult(
+        bills = emptyList(), platform = null, formatVersion = "未知",
+        encoding = "", totalRows = 0, issues = emptyList(), error = message,
+    )
+
     /**
      * 三种输入形态：
      *   1. 纯 CSV（支付宝网页端导出、手动解压后的文件）
@@ -160,7 +173,14 @@ object Parser {
         }
 
         // 先按 xlsx 试。xlsx 本身就是 zip，靠能否读出工作表区分。
-        val asXlsx = runCatching { Xlsx.read(bytes) }.getOrDefault(emptyList())
+        // 注意不能把「太大」也当成「不是 xlsx」吞掉，否则炸弹会继续往下走。
+        val asXlsx = try {
+            Xlsx.read(bytes)
+        } catch (e: InputTooLargeException) {
+            throw e
+        } catch (e: Exception) {
+            emptyList()
+        }
         if (asXlsx.isNotEmpty()) return Table(asXlsx, "xlsx")
 
         val entry = ZipUtil.extractFirst(bytes, password)
