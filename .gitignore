@@ -15,6 +15,9 @@ captures/
 # 本机真实账单，绝不入库
 samples/private/
 
+# 设计评审文档：只在本地留档，仓库只放代码
+design/review/
+
 # 系统
 .DS_Store
 Thumbs.db

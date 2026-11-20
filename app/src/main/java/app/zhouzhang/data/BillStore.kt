@@ -465,6 +465,60 @@ class BillStore(private val context: Context) {
         return out
     }
 
+    /** [from, toExclusive) 内的全部账单。月视图明细、分类下钻都用它 */
+    fun billsOfRange(from: LocalDate, toExclusive: LocalDate): List<Bill> {
+        val out = ArrayList<Bill>()
+        db().rawQuery(
+            "SELECT txn_time, platform, direction, amount_cents, flow_type, category, " +
+                    "counterparty, item, method, status, order_no, merchant_no, note, source_file " +
+                    "FROM bill WHERE txn_time >= ? AND txn_time < ? ORDER BY txn_time DESC",
+            bounds(from, toExclusive)
+        ).use { c ->
+            while (c.moveToNext()) {
+                out.add(
+                    Bill(
+                        txnTime = LocalDateTime.ofInstant(
+                            Instant.ofEpochMilli(c.getLong(0)), ZoneId.systemDefault()
+                        ),
+                        platform = Platform.valueOf(c.getString(1)),
+                        direction = Direction.valueOf(c.getString(2)),
+                        amountCents = c.getLong(3),
+                        flowType = FlowType.valueOf(c.getString(4)),
+                        category = c.getString(5),
+                        counterparty = c.getString(6),
+                        item = c.getString(7),
+                        method = c.getString(8),
+                        status = c.getString(9),
+                        orderNo = c.getString(10),
+                        merchantNo = c.getString(11),
+                        note = c.getString(12),
+                        sourceFile = c.getString(13),
+                    )
+                )
+            }
+        }
+        return out
+    }
+
+    /**
+     * 以 [endWeek] 结尾的最近 [weeks] 周消费合计。
+     * 缺数据的周补 0，保证返回长度恒等于 weeks —— 柱状图的横轴不能因为没消费就少一根。
+     */
+    fun weeklyTotals(endWeek: LocalDate, weeks: Int): List<Pair<LocalDate, Long>> {
+        val from = endWeek.minusWeeks((weeks - 1).toLong())
+        val sums = HashMap<String, Long>()
+        db().rawQuery(
+            "SELECT week_start, COALESCE(SUM(amount_cents),0) FROM bill " +
+                    "WHERE week_start >= ? AND week_start <= ? AND flow_type=? AND direction=? " +
+                    "GROUP BY week_start",
+            arrayOf(from.toString(), endWeek.toString(), FlowType.CONSUMPTION.name, Direction.EXPENSE.name)
+        ).use { c -> while (c.moveToNext()) sums[c.getString(0)] = c.getLong(1) }
+        return (0 until weeks).map { i ->
+            val w = from.plusWeeks(i.toLong())
+            w to (sums[w.toString()] ?: 0L)
+        }
+    }
+
     private fun bounds(from: LocalDate, toExclusive: LocalDate): Array<String> {
         val zone = ZoneId.systemDefault()
         return arrayOf(

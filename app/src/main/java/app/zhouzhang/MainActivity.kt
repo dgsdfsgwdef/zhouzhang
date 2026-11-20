@@ -10,26 +10,40 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.animateIntAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -91,7 +105,10 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-enum class Mode(val label: String) { WEEK("周"), MONTH("月") }
+enum class Mode(val label: String) { WEEK("周"), MONTH("月"), TREND("趋势") }
+
+/** 导入结果的三态。成功和失败不该长得一样 */
+enum class MsgKind { INFO, SUCCESS, PARTIAL, ERROR }
 
 fun money(cents: Long): String = (if (cents < 0) "-" else "") + "¥" + amountDigits(cents)
 
@@ -125,8 +142,12 @@ fun HomeScreen(store: BillStore) {
     var monthSum by remember { mutableStateOf<MonthSummary?>(null) }
     var prevSame by remember { mutableStateOf(0L) }
     var earliest by remember { mutableStateOf<LocalDate?>(null) }
+    var lastWeek by remember { mutableStateOf<LocalDate?>(null) }
 
     var message by remember { mutableStateOf<String?>(null) }
+    var msgKind by remember { mutableStateOf(MsgKind.INFO) }
+    var msgUndo by remember { mutableStateOf(false) }
+    var undoDismissed by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
 
     var pendingUri by remember { mutableStateOf<Uri?>(null) }
@@ -134,6 +155,12 @@ fun HomeScreen(store: BillStore) {
     var password by remember { mutableStateOf("") }
     var passwordError by remember { mutableStateOf<String?>(null) }
     var pendingQueue by remember { mutableStateOf<List<Uri>>(emptyList()) }
+
+    var monthBills by remember { mutableStateOf<List<Bill>>(emptyList()) }
+    var trend by remember { mutableStateOf<List<Pair<LocalDate, Long>>>(emptyList()) }
+    var uncategorized by remember { mutableStateOf(0) }
+    var dayFilter by remember { mutableStateOf<LocalDate?>(null) }
+    var drill by remember { mutableStateOf<String?>(null) }
 
     var hasData by remember { mutableStateOf(false) }
     var undoCount by remember { mutableStateOf(0) }
@@ -146,7 +173,11 @@ fun HomeScreen(store: BillStore) {
         weekSum = store.summary(weekStart)
         bills = store.billsOfWeek(weekStart)
         monthSum = store.monthSummary(month)
+        monthBills = store.billsOfRange(month.atDay(1), month.atDay(1).plusMonths(1))
+        trend = store.weeklyTotals(thisWeek, 12)
+        uncategorized = store.uncategorizedMerchants(500).size
         earliest = store.earliestDate()
+        lastWeek = store.latestDataWeek()
         hasData = store.totalCount() > 0
         undoCount = store.pendingUndoCount()
         mailConfigured = MailConfig.load(ctx) != null
@@ -160,7 +191,10 @@ fun HomeScreen(store: BillStore) {
         prevSame = store.sumConsumption(prevStart, prevStart.plusDays(days.toLong()))
     }
 
-    LaunchedEffect(weekStart, month) { withContext(Dispatchers.IO) { refresh() } }
+    LaunchedEffect(weekStart, month) {
+        dayFilter = null
+        withContext(Dispatchers.IO) { refresh() }
+    }
 
     /**
      * 支持一次选多个文件（微信 + 支付宝一起导）。
@@ -219,6 +253,14 @@ fun HomeScreen(store: BillStore) {
             passwordError = null
             pendingQueue = emptyList()
 
+            val hasProblem = problems.isNotEmpty() || issues > 0
+            msgKind = when {
+                added == 0 && hasProblem -> MsgKind.ERROR
+                hasProblem || duplicated > 0 -> MsgKind.PARTIAL
+                else -> MsgKind.SUCCESS
+            }
+            msgUndo = added > 0
+            undoDismissed = false
             message = buildString {
                 if (uris.size > 1) append("共 ${uris.size} 个文件\n\n")
                 append("解析 $parsed 条\n")
@@ -256,6 +298,8 @@ fun HomeScreen(store: BillStore) {
         val account = MailConfig.load(ctx)
         if (account == null) {
             message = "还没有配置邮箱"
+            msgKind = MsgKind.ERROR
+            msgUndo = false
             return
         }
         busy = true
@@ -264,6 +308,8 @@ fun HomeScreen(store: BillStore) {
                 val attachments = withContext(Dispatchers.IO) { ImapClient.fetchBills(account) }
                 if (attachments.isEmpty()) {
                     message = "最近 45 天没有找到账单邮件"
+                    msgKind = MsgKind.INFO
+                    msgUndo = false
                     return@launch
                 }
 
@@ -302,6 +348,13 @@ fun HomeScreen(store: BillStore) {
                     return@launch
                 }
 
+                msgUndo = added > 0
+                undoDismissed = false
+                msgKind = when {
+                    added == 0 -> MsgKind.PARTIAL
+                    skipped > 0 -> MsgKind.PARTIAL
+                    else -> MsgKind.SUCCESS
+                }
                 message = buildString {
                     append("收到 ${attachments.size} 个附件\n\n")
                     append("解析 $parsed 条\n")
@@ -317,6 +370,8 @@ fun HomeScreen(store: BillStore) {
                 withContext(Dispatchers.IO) { refresh() }
             } catch (e: Exception) {
                 message = "收信失败：${e.message ?: e.javaClass.simpleName}"
+                msgKind = MsgKind.ERROR
+                msgUndo = false
             } finally {
                 busy = false
             }
@@ -338,229 +393,270 @@ fun HomeScreen(store: BillStore) {
             val n = withContext(Dispatchers.IO) { store.undoLastImport() }
             withContext(Dispatchers.IO) { refresh() }
             message = "已撤销 $n 条记录"
+            msgKind = MsgKind.INFO
+            msgUndo = false
+            undoDismissed = false
         }
     }
 
-    Scaffold(
-        containerColor = Ink.Bg,
-        floatingActionButton = {
-            if (hasData) {
-                ExtendedFloatingActionButton(
-                    onClick = { picker.launch(mimeTypes) },
-                    containerColor = Ink.Text,
-                    contentColor = Ink.Bg,
-                    icon = { Icon(Icons.Rounded.Add, contentDescription = null) },
-                    text = { Text(if (busy) "解析中…" else "导入账单") },
-                )
-            }
+    val listState = rememberLazyListState()
+    val collapsed by remember { derivedStateOf { listState.firstVisibleItemIndex > 1 } }
+    val firstDate = earliest
+
+    val periodLabel = when (mode) {
+        Mode.WEEK -> Week.rangeLabel(weekStart)
+        Mode.MONTH -> "${month.year} 年 ${month.monthValue} 月"
+        Mode.TREND -> "最近 12 周"
+    }
+    val periodTotal = when (mode) {
+        Mode.WEEK -> weekSum?.totalCents ?: 0
+        Mode.MONTH -> monthSum?.totalCents ?: 0
+        Mode.TREND -> 0
+    }
+    val periodCount = when (mode) {
+        Mode.WEEK -> weekSum?.count ?: 0
+        Mode.MONTH -> monthSum?.count ?: 0
+        Mode.TREND -> 0
+    }
+    val canPrev = when (mode) {
+        Mode.WEEK -> firstDate == null || weekStart.minusWeeks(1).plusDays(6) >= firstDate
+        Mode.MONTH -> firstDate == null || !YearMonth.from(firstDate).isBefore(month.minusMonths(1))
+        Mode.TREND -> false
+    }
+    val canNext = when (mode) {
+        Mode.WEEK -> weekStart.isBefore(thisWeek)
+        Mode.MONTH -> month.isBefore(thisMonth)
+        Mode.TREND -> false
+    }
+
+    Column(
+        Modifier
+            .fillMaxSize()
+            .background(Ink.Bg)
+            .systemBarsPadding(),
+    ) {
+        ZHeader(
+            title = if (hasData) periodLabel else "周账",
+            subtitle = if (collapsed && mode != Mode.TREND) "${money(periodTotal)} · $periodCount 笔" else null,
+            showNav = hasData && mode != Mode.TREND,
+            canPrev = canPrev,
+            canNext = canNext,
+            onPrev = { if (mode == Mode.WEEK) weekStart = weekStart.minusWeeks(1) else month = month.minusMonths(1) },
+            onNext = { if (mode == Mode.WEEK) weekStart = weekStart.plusWeeks(1) else month = month.plusMonths(1) },
+            busy = busy,
+            showImport = hasData,
+            onImport = { picker.launch(mimeTypes) },
+            onSettings = { showSettings = true },
+        )
+        // 解析 1–3 万行要几秒，没有进度条会像「点了没反应」
+        if (busy) {
+            LinearProgressIndicator(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(2.dp),
+                color = Ink.AccentFill,
+                trackColor = Ink.Sunk,
+            )
         }
-    ) { pad ->
+
         if (!hasData) {
             Onboarding(
-                modifier = Modifier
-                    .fillMaxSize()
-                    .padding(pad),
+                modifier = Modifier.weight(1f),
                 busy = busy,
                 onImport = { picker.launch(mimeTypes) },
             )
         } else {
-        LazyColumn(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(pad)
-                .padding(horizontal = 20.dp),
-            contentPadding = PaddingValues(top = 20.dp, bottom = 96.dp),
-        ) {
-            item {
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    ModeSwitch(mode) { mode = it }
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        TextButton(onClick = { showRules = true }) {
-                            Text("分类整理", style = ZType.secondary, color = Ink.Text2)
-                        }
-                        IconButton(onClick = { showSettings = true }) {
-                            Icon(Icons.Rounded.Settings, "设置", tint = Ink.Text2)
-                        }
-                    }
-                }
-                if (undoCount > 0) {
-                    Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Text("上次导入新增 $undoCount 条", style = ZType.caption, color = Ink.Text2)
-                        TextButton(onClick = { doUndo() }) {
-                            Text("撤销", style = ZType.secondary, color = Ink.Accent)
-                        }
-                    }
-                }
-                Spacer(Modifier.height(18.dp))
-            }
-
-            if (mode == Mode.WEEK) {
+            LazyColumn(
+                state = listState,
+                modifier = Modifier.weight(1f),
+                contentPadding = PaddingValues(start = 18.dp, end = 18.dp, top = 6.dp, bottom = 36.dp),
+            ) {
                 item {
-                    PeriodBar(
-                        label = Week.rangeLabel(weekStart),
-                        canPrev = earliest == null || weekStart.minusWeeks(1).plusDays(6) >= earliest,
-                        canNext = weekStart.isBefore(thisWeek),
-                        onPrev = { weekStart = weekStart.minusWeeks(1) },
-                        onNext = { weekStart = weekStart.plusWeeks(1) },
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    val weekTotal = weekSum?.totalCents ?: 0
-                    val weekCount = weekSum?.count ?: 0
-                    val weekDelta = if (prevSame > 0 && weekTotal > 0) {
-                        (weekTotal - prevSame) * 100.0 / prevSame
-                    } else {
-                        null
-                    }
-                    AmountBlock(
-                        total = weekTotal,
-                        meta = if (weekCount > 0) "$weekCount 笔消费" else "这周没有记录",
-                        deltaPct = weekDelta?.let { kotlin.math.abs(it).toInt() },
-                        deltaUp = (weekDelta ?: 0.0) >= 0,
-                    )
-                }
-
-                item { Spacer(Modifier.height(24.dp)) }
-
-                item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Ink.Surface),
-                        shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, Ink.Border),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(Modifier.padding(18.dp)) {
-                            WeekBars(weekSum?.days ?: emptyList(), weekStart)
-                            Spacer(Modifier.height(18.dp))
-                            HorizontalDivider(color = Ink.Hairline)
-                            Spacer(Modifier.height(14.dp))
-                            val cats = weekSum?.categories.orEmpty()
-                            if (cats.isEmpty()) {
-                                Text("这周还没有消费记录", style = ZType.secondary, color = Ink.Text2)
-                            } else {
-                                cats.take(6).forEach { c ->
-                                    CategoryRow(c.category, c.cents, weekSum!!.totalCents)
-                                }
-                            }
-                        }
-                    }
-                }
-
-                item { Spacer(Modifier.height(26.dp)) }
-
-                item {
-                    Text("明细", style = ZType.secondary, color = Ink.Text2)
-                    Spacer(Modifier.height(10.dp))
-                }
-
-                if (bills.isEmpty()) {
-                    item {
-                        Text(
-                            "点右下角导入微信或支付宝导出的账单。\n" +
-                                    "支持 CSV、XLSX，以及带密码的 zip。",
-                            style = ZType.secondary,
-                            color = Ink.Text2,
-                            lineHeight = 20.sp,
+                    if (undoCount > 0 && !undoDismissed) {
+                        UndoStrip(
+                            count = undoCount,
+                            onUndo = { doUndo() },
+                            onDismiss = { undoDismissed = true },
                         )
+                        Spacer(Modifier.height(10.dp))
                     }
-                } else {
-                    items(bills) { b -> BillRow(b) }
-                }
-            } else {
-                item {
-                    PeriodBar(
-                        label = "${month.year} 年 ${month.monthValue} 月",
-                        canPrev = earliest == null ||
-                                !YearMonth.from(earliest).isBefore(month.minusMonths(1)),
-                        canNext = month.isBefore(thisMonth),
-                        onPrev = { month = month.minusMonths(1) },
-                        onNext = { month = month.plusMonths(1) },
-                        prevLabel = "上个月",
-                        nextLabel = "下个月",
-                    )
-                    Spacer(Modifier.height(10.dp))
-                    val total = monthSum?.totalCents ?: 0
-                    val cnt = monthSum?.count ?: 0
-                    // 当月只过了几天就只除以几天，否则日均会被低估
-                    val dayCount = if (month == thisMonth) today.dayOfMonth else month.lengthOfMonth()
-                    val prevMonth = monthSum?.prevTotalCents ?: 0
-                    val monthDelta = if (prevMonth > 0 && total > 0) {
-                        (total - prevMonth) * 100.0 / prevMonth
-                    } else {
-                        null
+                    ModeSwitch(mode) {
+                        if (it != mode) {
+                            mode = it
+                            dayFilter = null
+                            scope.launch { listState.scrollToItem(0) }
+                        }
                     }
-                    AmountBlock(
-                        total = total,
-                        meta = if (cnt > 0) "$cnt 笔 · 日均 ${money(total / dayCount)}" else "本月没有记录",
-                        deltaPct = monthDelta?.let { kotlin.math.abs(it).toInt() },
-                        deltaUp = (monthDelta ?: 0.0) >= 0,
-                        deltaLabel = "比上月",
-                    )
+                    Spacer(Modifier.height(18.dp))
                 }
 
-                item { Spacer(Modifier.height(24.dp)) }
+                when (mode) {
+                    Mode.WEEK -> {
+                        val total = weekSum?.totalCents ?: 0
+                        val count = weekSum?.count ?: 0
+                        val delta = if (prevSame > 0 && total > 0) (total - prevSame) * 100.0 / prevSame else null
+                        val cats = weekSum?.categories.orEmpty()
+                        val days = weekSum?.days.orEmpty()
+                        val filtered = if (dayFilter == null) bills else bills.filter { it.txnTime.toLocalDate() == dayFilter }
+                        val grouped = filtered.groupBy { it.txnTime.toLocalDate() }
+                            .toList().sortedByDescending { it.first }
 
-                item {
-                    Card(
-                        colors = CardDefaults.cardColors(containerColor = Ink.Surface),
-                        shape = RoundedCornerShape(14.dp),
-                        border = BorderStroke(1.dp, Ink.Border),
-                        modifier = Modifier.fillMaxWidth(),
-                    ) {
-                        Column(Modifier.padding(18.dp)) {
-                            Text("分类占比", style = ZType.secondary, color = Ink.Text2)
-                            Spacer(Modifier.height(10.dp))
-                            val cats = monthSum?.categories.orEmpty()
-                            if (cats.isEmpty()) {
-                                Text("本月还没有消费记录", style = ZType.secondary, color = Ink.Text2)
+                        item {
+                            Text("本周支出", style = ZType.caption, color = Ink.Text3)
+                            Spacer(Modifier.height(2.dp))
+                            AmountBlock(
+                                total = total,
+                                meta = if (count > 0) "$count 笔消费" else "这周还没有记录",
+                                deltaPct = delta?.let { kotlin.math.abs(it).toInt() },
+                                deltaUp = (delta ?: 0.0) >= 0,
+                            )
+                            Spacer(Modifier.height(18.dp))
+                        }
+
+                        item {
+                            if (total > 0) {
+                                ChartCard(days, weekStart, dayFilter) { dayFilter = it }
                             } else {
-                                cats.forEach { c ->
-                                    CategoryRow(c.category, c.cents, monthSum!!.totalCents)
-                                }
+                                EmptyWeekCard(lastWeek) { w -> weekStart = w }
+                            }
+                            Spacer(Modifier.height(20.dp))
+                        }
+
+                        item { SectionHeader("分类", uncategorized, onManage = { showRules = true }) }
+                        items(cats) { c ->
+                            CategoryRow(c.category, c.cents, total) { drill = c.category }
+                        }
+
+                        item { DetailHeader(dayFilter) { dayFilter = null } }
+
+                        if (grouped.isEmpty()) {
+                            item {
+                                Text(
+                                    if (dayFilter != null) "这天没有记录。" else "导入账单后，这里会按天列出每一笔。",
+                                    style = ZType.secondary,
+                                    color = Ink.Text3,
+                                )
+                            }
+                        } else {
+                            grouped.forEach { (date, list) ->
+                                item { DayHeader(date, list) }
+                                items(list) { b -> BillRow(b) }
                             }
                         }
                     }
-                }
 
-                item { Spacer(Modifier.height(16.dp)) }
+                    Mode.MONTH -> {
+                        val total = monthSum?.totalCents ?: 0
+                        val cnt = monthSum?.count ?: 0
+                        val dayCount = if (month == thisMonth) today.dayOfMonth else month.lengthOfMonth()
+                        val prevMonth = monthSum?.prevTotalCents ?: 0
+                        val delta = if (prevMonth > 0 && total > 0) (total - prevMonth) * 100.0 / prevMonth else null
+                        val cats = monthSum?.categories.orEmpty()
+                        val filtered = if (dayFilter == null) monthBills else monthBills.filter { it.txnTime.toLocalDate() == dayFilter }
+                        val grouped = filtered.groupBy { it.txnTime.toLocalDate() }
+                            .toList().sortedByDescending { it.first }
 
-                item {
-                    val merchants = monthSum?.merchants.orEmpty()
-                    if (merchants.isNotEmpty()) {
-                        Card(
-                            colors = CardDefaults.cardColors(containerColor = Ink.Surface),
-                            shape = RoundedCornerShape(14.dp),
-                            border = BorderStroke(1.dp, Ink.Border),
-                            modifier = Modifier.fillMaxWidth(),
-                        ) {
-                            Column(Modifier.padding(18.dp)) {
-                                Text("花得最多的商户", style = ZType.secondary, color = Ink.Text2)
-                                Spacer(Modifier.height(6.dp))
-                                merchants.forEachIndexed { i, m ->
-                                    MerchantRow(i + 1, m)
-                                }
+                        item {
+                            Text("本月支出", style = ZType.caption, color = Ink.Text3)
+                            Spacer(Modifier.height(2.dp))
+                            AmountBlock(
+                                total = total,
+                                meta = if (cnt > 0) "$cnt 笔 · 日均 ${money(total / dayCount)}" else "本月还没有记录",
+                                deltaPct = delta?.let { kotlin.math.abs(it).toInt() },
+                                deltaUp = (delta ?: 0.0) >= 0,
+                                deltaLabel = "比上月",
+                            )
+                            Spacer(Modifier.height(18.dp))
+                        }
+
+                        item { SectionHeader("分类占比", uncategorized, onManage = { showRules = true }) }
+                        items(cats) { c ->
+                            CategoryRow(c.category, c.cents, total) { drill = c.category }
+                        }
+
+                        val merchants = monthSum?.merchants.orEmpty()
+                        if (merchants.isNotEmpty()) {
+                            item {
+                                Spacer(Modifier.height(18.dp))
+                                SectionHeader("花得最多的商户", 0, onManage = {}, showManage = false)
+                                merchants.forEachIndexed { i, m -> MerchantRow(i + 1, m) }
                             }
                         }
+
+                        item { DetailHeader(dayFilter) { dayFilter = null } }
+
+                        if (grouped.isEmpty()) {
+                            item {
+                                Text(
+                                    if (dayFilter != null) "这天没有记录。" else "本月还没有可列的明细。",
+                                    style = ZType.secondary,
+                                    color = Ink.Text3,
+                                )
+                            }
+                        } else {
+                            grouped.forEach { (date, list) ->
+                                item { DayHeader(date, list) }
+                                items(list) { b -> BillRow(b) }
+                            }
+                        }
+                    }
+
+                    Mode.TREND -> {
+                        item {
+                            TrendCard(trend) { w ->
+                                weekStart = w
+                                mode = Mode.WEEK
+                                scope.launch { listState.scrollToItem(0) }
+                            }
+                            Spacer(Modifier.height(12.dp))
+                        }
+                        item { TrendStats(trend) }
                     }
                 }
             }
-        }
         }
     }
 
-    if (message != null) {
+    message?.let { body ->
+        val icon = when (msgKind) {
+            MsgKind.SUCCESS -> Icons.Rounded.CheckCircle
+            MsgKind.PARTIAL -> Icons.Rounded.Warning
+            MsgKind.ERROR -> Icons.Rounded.ErrorOutline
+            MsgKind.INFO -> Icons.Rounded.Info
+        }
+        val tint = when (msgKind) {
+            MsgKind.SUCCESS -> Ink.Down
+            MsgKind.PARTIAL -> Ink.AccentFill
+            MsgKind.ERROR -> Ink.Up
+            MsgKind.INFO -> Ink.Text3
+        }
+        val title = when (msgKind) {
+            MsgKind.SUCCESS -> "导入完成"
+            MsgKind.PARTIAL -> "部分导入"
+            MsgKind.ERROR -> "导入失败"
+            MsgKind.INFO -> "提示"
+        }
+        // 撤销入口只在这里出现一次：刚看完结果，是唯一有撤销意愿的时刻
+        val undoButton: (@Composable () -> Unit)? = if (msgUndo) {
+            {
+                TextButton(onClick = {
+                    message = null
+                    doUndo()
+                }) {
+                    Text("撤销本次导入", style = ZType.secondary, color = Ink.Up)
+                }
+            }
+        } else null
+
         AlertDialog(
             onDismissRequest = { message = null },
-            confirmButton = { TextButton(onClick = { message = null }) { Text("好") } },
-            title = { Text("导入结果", style = ZType.title) },
-            text = { Text(message!!, style = ZType.bodySmall, lineHeight = 21.sp) },
+            icon = { Icon(icon, contentDescription = null, tint = tint) },
+            title = { Text(title, style = ZType.title) },
+            text = { Text(body, style = ZType.bodySmall, lineHeight = 21.sp) },
+            confirmButton = {
+                TextButton(onClick = { message = null }) { Text("好") }
+            },
+            dismissButton = undoButton,
             containerColor = Ink.Surface,
         )
     }
@@ -572,7 +668,7 @@ fun HomeScreen(store: BillStore) {
             text = {
                 Column {
                     Text(
-                        "支付宝的交易明细压缩包是加密的。密码通常是身份证后 6 位或手机号后 6 位。",
+                        "这个账单压缩包是加密的。密码通常是身份证后 6 位或手机号后 6 位。",
                         style = ZType.secondary,
                         lineHeight = 20.sp,
                     )
@@ -629,6 +725,25 @@ fun HomeScreen(store: BillStore) {
         }
     }
 
+    drill?.let { cat ->
+        val isWeek = mode == Mode.WEEK
+        val cats = if (isWeek) weekSum?.categories else monthSum?.categories
+        CategoryDrillSheet(
+            category = cat,
+            from = if (isWeek) weekStart else month.atDay(1),
+            to = if (isWeek) weekStart.plusDays(7) else month.atDay(1).plusMonths(1),
+            periodLabel = if (isWeek) "本周" else "本月",
+            categoryTotal = cats?.firstOrNull { it.category == cat }?.cents ?: 0L,
+            periodTotal = if (isWeek) weekSum?.totalCents ?: 0 else monthSum?.totalCents ?: 0,
+            store = store,
+            onDismiss = { drill = null },
+            onManageRules = {
+                drill = null
+                showRules = true
+            },
+        )
+    }
+
     if (showSettings) {
         ModalBottomSheet(
             onDismissRequest = { showSettings = false },
@@ -657,76 +772,160 @@ fun HomeScreen(store: BillStore) {
 /** 空状态引导：新用户打开就是一片空白，得先告诉他账单从哪来 */
 @Composable
 fun Onboarding(modifier: Modifier = Modifier, busy: Boolean, onImport: () -> Unit) {
+    var expanded by remember { mutableStateOf<String?>(null) }
+
     Column(
         modifier
-            .padding(horizontal = 28.dp)
+            .padding(horizontal = 24.dp)
             .verticalScroll(rememberScrollState()),
     ) {
-        Spacer(Modifier.height(56.dp))
+        Spacer(Modifier.height(24.dp))
         Text("周账", style = ZType.displaySmall, color = Ink.Text)
-        Spacer(Modifier.height(8.dp))
+        Spacer(Modifier.height(10.dp))
         Text(
-            "导入微信和支付宝的官方账单，看每周花了多少、花在哪。数据只存在这台手机上。",
-            style = ZType.bodySmall,
-            lineHeight = 22.sp,
+            "把微信和支付宝的官方账单，变成「每周花了多少、花在哪」。",
+            style = ZType.body,
             color = Ink.Text2,
         )
+        Spacer(Modifier.height(14.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            TrustChip("只存本机")
+            TrustChip("数据库加密")
+            TrustChip("导入可撤销")
+        }
 
-        Spacer(Modifier.height(34.dp))
-        Text("账单从哪来", style = ZType.secondary, color = Ink.Text2)
-        Spacer(Modifier.height(12.dp))
-
-        StepCard(
-            "微信",
-            "我 → 服务 → 钱包 → 账单 → 常见问题 → 下载账单 → 用于个人对账，填邮箱和支付密码。",
-            "邮件里是加密压缩包，解压码由「微信支付」公众号推送。",
-        )
-        Spacer(Modifier.height(12.dp))
-        StepCard(
-            "支付宝",
-            "我的 → 账单 → 右上角「…」→ 开具交易流水证明 → 用于个人对账，发到邮箱。",
-            "邮件里是加密 zip，密码通常是身份证后 6 位或手机号后 6 位。",
-        )
-
-        Spacer(Modifier.height(30.dp))
+        Spacer(Modifier.height(24.dp))
         Button(
             onClick = onImport,
             enabled = !busy,
             modifier = Modifier
                 .fillMaxWidth()
-                .height(50.dp),
+                .height(52.dp),
             colors = ButtonDefaults.buttonColors(
                 containerColor = Ink.Text,
                 contentColor = Ink.Bg,
             ),
-            shape = RoundedCornerShape(13.dp),
+            shape = RoundedCornerShape(12.dp),
         ) {
-            Text(if (busy) "解析中…" else "导入账单", style = ZType.body)
+            Text(if (busy) "解析中…" else "选择账单文件", style = ZType.titleSmall)
         }
-        Spacer(Modifier.height(12.dp))
+        Spacer(Modifier.height(10.dp))
         Text(
-            "支持 CSV、XLSX 和加密 zip，可以一次选多个文件。",
-            style = ZType.caption,
-            color = Ink.Text2,
+            "CSV / XLSX / 加密 zip · 可一次选多个",
+            style = ZType.micro,
+            color = Ink.Text3,
+            modifier = Modifier.fillMaxWidth(),
+            textAlign = TextAlign.Center,
         )
-        Spacer(Modifier.height(40.dp))
+
+        Spacer(Modifier.height(28.dp))
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("账单从哪来", style = ZType.bodySmall, color = Ink.Text, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            Text("两家路径不同", style = ZType.micro, color = Ink.Text3)
+        }
+        Spacer(Modifier.height(8.dp))
+
+        StepCard(
+            platform = "微信",
+            steps = listOf(
+                "我 → 服务 → 钱包 → 账单",
+                "常见问题 → 下载账单 → 用于个人对账",
+                "填邮箱和支付密码，收到加密压缩包",
+            ),
+            note = "解压码由「微信支付」公众号推送。",
+            expanded = expanded == "微信",
+            onToggle = { expanded = if (expanded == "微信") null else "微信" },
+        )
+        Spacer(Modifier.height(8.dp))
+        StepCard(
+            platform = "支付宝",
+            steps = listOf(
+                "我的 → 账单 → 右上角「…」",
+                "开具交易流水证明 → 用于个人对账",
+                "填邮箱，收到加密 zip",
+            ),
+            note = "密码通常是身份证后 6 位或手机号后 6 位。",
+            expanded = expanded == "支付宝",
+            onToggle = { expanded = if (expanded == "支付宝") null else "支付宝" },
+        )
+        Spacer(Modifier.height(36.dp))
     }
 }
 
 @Composable
-fun StepCard(platform: String, path: String, note: String) {
-    Card(
-        colors = CardDefaults.cardColors(containerColor = Ink.Surface),
-        shape = RoundedCornerShape(14.dp),
-        border = BorderStroke(1.dp, Ink.Border),
-        modifier = Modifier.fillMaxWidth(),
+fun TrustChip(text: String) {
+    Row(
+        Modifier
+            .clip(RoundedCornerShape(5.dp))
+            .background(Ink.Sunk)
+            .padding(horizontal = 8.dp, vertical = 3.dp),
+        verticalAlignment = Alignment.CenterVertically,
     ) {
-        Column(Modifier.padding(16.dp)) {
-            Text(platform, style = ZType.bodySmall, fontWeight = FontWeight.Medium, color = Ink.Text)
-            Spacer(Modifier.height(6.dp))
-            Text(path, style = ZType.secondary, lineHeight = 20.sp, color = Ink.Text)
-            Spacer(Modifier.height(6.dp))
-            Text(note, style = ZType.caption, lineHeight = 18.sp, color = Ink.Text2)
+        Text("✓", style = ZType.micro, color = Ink.Accent)
+        Spacer(Modifier.width(4.dp))
+        Text(text, style = ZType.micro, color = Ink.Text2)
+    }
+}
+
+/** 折叠的步骤卡：默认只占一行，点开才展开完整路径 */
+@Composable
+fun StepCard(
+    platform: String,
+    steps: List<String>,
+    note: String,
+    expanded: Boolean,
+    onToggle: () -> Unit,
+) {
+    val shape = RoundedCornerShape(12.dp)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .background(Ink.Surface)
+            .border(1.dp, Ink.Border, shape),
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable(onClick = onToggle)
+                .padding(horizontal = 14.dp, vertical = 13.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(platform, style = ZType.bodySmall, color = Ink.Text, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.weight(1f))
+            Text(
+                if (expanded) "收起 ▴" else "展开步骤 ▾",
+                style = ZType.micro,
+                color = Ink.Text3,
+            )
+        }
+        if (expanded) {
+            Column(Modifier.padding(start = 14.dp, end = 14.dp, bottom = 14.dp)) {
+                HorizontalDivider(color = Ink.Hairline)
+                steps.forEachIndexed { i, step ->
+                    Row(Modifier.padding(top = 9.dp)) {
+                        Box(
+                            Modifier
+                                .size(16.dp)
+                                .clip(CircleShape)
+                                .background(Ink.Sunk),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Text("${i + 1}", style = ZType.micro, color = Ink.Text2)
+                        }
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            step,
+                            style = ZType.caption,
+                            color = Ink.Text2,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
+                Spacer(Modifier.height(8.dp))
+                Text(note, style = ZType.micro, color = Ink.Text3)
+            }
         }
     }
 }
@@ -1131,10 +1330,83 @@ fun SettingsSheet(
 }
 
 @Composable
+fun ZHeader(
+    title: String,
+    subtitle: String?,
+    showNav: Boolean,
+    canPrev: Boolean,
+    canNext: Boolean,
+    onPrev: () -> Unit,
+    onNext: () -> Unit,
+    busy: Boolean,
+    showImport: Boolean,
+    onImport: () -> Unit,
+    onSettings: () -> Unit,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(min = 56.dp)
+            .padding(start = 2.dp, end = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        if (showNav) {
+            IconButton(onClick = onPrev, enabled = canPrev, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    Icons.Rounded.ChevronLeft,
+                    contentDescription = "上一期",
+                    tint = if (canPrev) Ink.Text else Ink.Hairline,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
+        Column(Modifier.weight(1f)) {
+            Text(title, style = ZType.titleSmall, color = Ink.Text, maxLines = 1)
+            // 滚出首屏后，周期与金额挂在这里，不占额外高度
+            if (subtitle != null) {
+                Text(subtitle, style = ZType.caption, color = Ink.Text3, maxLines = 1)
+            }
+        }
+        if (showNav) {
+            IconButton(onClick = onNext, enabled = canNext, modifier = Modifier.size(36.dp)) {
+                Icon(
+                    Icons.Rounded.ChevronRight,
+                    contentDescription = "下一期",
+                    tint = if (canNext) Ink.Text else Ink.Hairline,
+                    modifier = Modifier.size(20.dp),
+                )
+            }
+        }
+        if (showImport) {
+            TextButton(
+                onClick = onImport,
+                enabled = !busy,
+                contentPadding = PaddingValues(horizontal = 8.dp),
+            ) {
+                Text(
+                    if (busy) "解析中" else "导入",
+                    style = ZType.secondary,
+                    color = if (busy) Ink.Text3 else Ink.Accent,
+                )
+            }
+        }
+        IconButton(onClick = onSettings, modifier = Modifier.size(36.dp)) {
+            Icon(
+                Icons.Rounded.Settings,
+                contentDescription = "设置",
+                tint = Ink.Text2,
+                modifier = Modifier.size(19.dp),
+            )
+        }
+    }
+}
+
+@Composable
 fun ModeSwitch(mode: Mode, onChange: (Mode) -> Unit) {
     Row(
         Modifier
-            .clip(RoundedCornerShape(11.dp))
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
             .background(Ink.Sunk)
             .padding(3.dp)
     ) {
@@ -1142,10 +1414,12 @@ fun ModeSwitch(mode: Mode, onChange: (Mode) -> Unit) {
             val selected = m == mode
             Box(
                 Modifier
-                    .clip(RoundedCornerShape(9.dp))
+                    .weight(1f)
+                    .clip(RoundedCornerShape(8.dp))
                     .background(if (selected) Ink.Text else Color.Transparent)
                     .clickable { onChange(m) }
-                    .padding(horizontal = 20.dp, vertical = 10.dp)
+                    .padding(vertical = 9.dp),
+                contentAlignment = Alignment.Center,
             ) {
                 Text(
                     m.label,
@@ -1157,47 +1431,10 @@ fun ModeSwitch(mode: Mode, onChange: (Mode) -> Unit) {
     }
 }
 
-@Composable
-fun PeriodBar(
-    label: String,
-    canPrev: Boolean,
-    canNext: Boolean,
-    onPrev: () -> Unit,
-    onNext: () -> Unit,
-    prevLabel: String = "上一周",
-    nextLabel: String = "下一周",
-) {
-    Row(
-        Modifier.fillMaxWidth(),
-        horizontalArrangement = Arrangement.SpaceBetween,
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        ArrowButton(Icons.Rounded.ChevronLeft, canPrev, onPrev, prevLabel)
-        Text(label, style = ZType.bodySmall, color = Ink.Text2)
-        ArrowButton(Icons.Rounded.ChevronRight, canNext, onNext, nextLabel)
-    }
-}
-
-@Composable
-fun ArrowButton(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
-    enabled: Boolean,
-    onClick: () -> Unit,
-    label: String,
-) {
-    IconButton(onClick = onClick, enabled = enabled) {
-        Icon(
-            icon,
-            contentDescription = label,
-            tint = if (enabled) Ink.Text else Ink.Hairline,
-        )
-    }
-}
-
 /**
- * 本周金额。整屏唯一的视觉重心。
+ * 金额。整屏唯一的视觉重心。
  *
- * ¥ 比数字小一档并基线对齐——符号是单位，不该和数值抢注意力；
+ * ¥ 比数字小一档并共用基线——符号是单位，不该和数值抢注意力；
  * 数字走 ZType.display（内含 tnum），左右翻周时不会横向抖动。
  * 环比单独成 chip 而不是拼进字符串，涨跌才能上色。
  */
@@ -1209,9 +1446,14 @@ fun AmountBlock(
     deltaUp: Boolean = true,
     deltaLabel: String = "比上周同期",
 ) {
+    // 240ms 计数。翻周时让「数字变了」可感知，而不是整屏硬切
+    val shown by animateIntAsState(
+        targetValue = total.coerceIn(0L, Int.MAX_VALUE.toLong()).toInt(),
+        animationSpec = tween(240),
+        label = "amount",
+    )
     Column {
         Row {
-            // 符号与数字共用一条基线，比手工调 padding 稳
             Text(
                 "¥",
                 style = ZType.secondary,
@@ -1219,7 +1461,7 @@ fun AmountBlock(
                 modifier = Modifier.alignByBaseline(),
             )
             Text(
-                amountDigits(total),
+                amountDigits(shown.toLong()),
                 style = ZType.display,
                 color = Ink.Text,
                 modifier = Modifier.alignByBaseline(),
@@ -1258,6 +1500,254 @@ fun DeltaChip(pct: Int, up: Boolean) {
     }
 }
 
+/** 区块标题。「待归类」角标只在这里出现，清零即消失 */
+@Composable
+fun SectionHeader(
+    title: String,
+    pending: Int,
+    onManage: () -> Unit,
+    showManage: Boolean = true,
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(enabled = showManage, onClick = onManage)
+            .padding(top = 6.dp, bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(title, style = ZType.bodySmall, color = Ink.Text, fontWeight = FontWeight.SemiBold)
+        if (pending > 0) {
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "$pending 个待归类",
+                style = ZType.micro,
+                color = Ink.Accent,
+                modifier = Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Ink.Sunk)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+            )
+        }
+        Spacer(Modifier.weight(1f))
+        if (showManage) {
+            Text("管理 ›", style = ZType.micro, color = Ink.Text3)
+        }
+    }
+}
+
+@Composable
+fun DetailHeader(dayFilter: LocalDate?, onClear: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .padding(top = 20.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("明细", style = ZType.bodySmall, color = Ink.Text, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.weight(1f))
+        if (dayFilter != null) {
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Ink.Sunk)
+                    .clickable(onClick = onClear)
+                    .padding(horizontal = 6.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    "只看 ${dayFilter.monthValue}/${dayFilter.dayOfMonth}",
+                    style = ZType.micro,
+                    color = Ink.Text2,
+                )
+                Spacer(Modifier.width(4.dp))
+                Text("✕", style = ZType.micro, color = Ink.Text3)
+            }
+        }
+    }
+}
+
+/** 日组头：这一天花了多少，让长列表可以跳读 */
+@Composable
+fun DayHeader(date: LocalDate, list: List<Bill>) {
+    val total = list
+        .filter { it.flowType == FlowType.CONSUMPTION && it.direction == Direction.EXPENSE }
+        .sumOf { it.amountCents }
+    val name = if (date == LocalDate.now()) "今天" else "周${weekdayLabel(date)}"
+    Column {
+        HorizontalDivider(color = Ink.Hairline, modifier = Modifier.padding(top = 12.dp))
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(top = 8.dp, bottom = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text("$name ${date.monthValue}/${date.dayOfMonth}", style = ZType.caption, color = Ink.Text3)
+            Spacer(Modifier.weight(1f))
+            Text(money(total), style = ZType.caption, color = Ink.Text3)
+        }
+    }
+}
+
+@Composable
+fun MiniBadge(text: String) {
+    Text(
+        text,
+        style = ZType.micro,
+        color = Ink.Text2,
+        modifier = Modifier
+            .clip(RoundedCornerShape(3.dp))
+            .background(Ink.Sunk)
+            .padding(horizontal = 4.dp, vertical = 1.dp),
+    )
+}
+
+@Composable
+fun ChartCard(
+    days: List<DaySum>,
+    start: LocalDate,
+    selected: LocalDate?,
+    onSelect: (LocalDate?) -> Unit,
+) {
+    val peak = days.maxByOrNull { it.cents }
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Ink.Surface),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, Ink.Border),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("每日支出", style = ZType.caption, color = Ink.Text3)
+                if (peak != null && peak.cents > 0) {
+                    Text(
+                        "周${weekdayLabel(peak.date)}最高 ${money(peak.cents)}",
+                        style = ZType.micro,
+                        color = Ink.Text3,
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            DayBars(days, start, selected, onSelect)
+        }
+    }
+}
+
+/**
+ * 七天柱状图。柱子可点——点某天筛下面明细，再点一次取消。
+ * 未来日期画成淡柱且文字半透明，不再和「零消费」长得一样。
+ */
+@Composable
+fun DayBars(
+    days: List<DaySum>,
+    start: LocalDate,
+    selected: LocalDate?,
+    onSelect: (LocalDate?) -> Unit,
+) {
+    val max = (days.maxOfOrNull { it.cents } ?: 0L).coerceAtLeast(1L)
+    val today = LocalDate.now()
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .height(120.dp),
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        (0..6).forEach { i ->
+            val d = start.plusDays(i.toLong())
+            val cents = days.firstOrNull { it.date == d }?.cents ?: 0L
+            val future = d.isAfter(today)
+            val ratio = (cents.toFloat() / max).coerceIn(0f, 1f)
+            val h by animateFloatAsState(
+                targetValue = if (cents == 0L || future) 3f else (ratio * 82f).coerceAtLeast(8f),
+                animationSpec = tween(320),
+                label = "dayBar",
+            )
+            Column(
+                Modifier
+                    .weight(1f)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable { onSelect(if (selected == d) null else d) },
+                verticalArrangement = Arrangement.Bottom,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Box(
+                    Modifier
+                        .fillMaxWidth(0.6f)
+                        .height(h.dp)
+                        .clip(RoundedCornerShape(3.dp))
+                        .background(
+                            when {
+                                d == today -> Ink.AccentFill
+                                future -> Ink.Hairline.copy(alpha = 0.45f)
+                                cents == 0L -> Ink.BarIdle.copy(alpha = 0.55f)
+                                selected == d -> Ink.Text
+                                else -> Ink.BarIdle
+                            }
+                        )
+                )
+                Spacer(Modifier.height(7.dp))
+                Text(
+                    weekdayLabel(d),
+                    style = ZType.micro,
+                    color = when {
+                        d == today -> Ink.Accent
+                        future -> Ink.Text3.copy(alpha = 0.5f)
+                        else -> Ink.Text2
+                    },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+fun CategoryRow(name: String, cents: Long, total: Long, onClick: () -> Unit) {
+    val pct = if (total > 0) (cents * 100.0 / total).toInt() else 0
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
+    ) {
+        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+            Text(name, style = ZType.bodySmall, color = Ink.Text)
+            Row {
+                Text(money(cents), style = ZType.bodySmall, color = Ink.Text)
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    "$pct%",
+                    style = ZType.caption,
+                    color = Ink.Text3,
+                    modifier = Modifier.width(32.dp),
+                    textAlign = TextAlign.End,
+                )
+            }
+        }
+        Spacer(Modifier.height(7.dp))
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .height(4.dp)
+                .clip(RoundedCornerShape(2.dp))
+                .background(Ink.Sunk)
+        ) {
+            Box(
+                Modifier
+                    .fillMaxWidth((pct.coerceIn(0, 100)) / 100f)
+                    .fillMaxHeight()
+                    .clip(RoundedCornerShape(2.dp))
+                    .background(Ink.AccentFill)
+            )
+        }
+    }
+}
+
 @Composable
 fun MerchantRow(rank: Int, m: CategorySum) {
     Row(
@@ -1267,7 +1757,7 @@ fun MerchantRow(rank: Int, m: CategorySum) {
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Text(
-            "$rank", style = ZType.caption, color = Ink.Text2,
+            "$rank", style = ZType.caption, color = Ink.Text3,
             modifier = Modifier.width(20.dp),
         )
         Text(
@@ -1282,90 +1772,12 @@ fun MerchantRow(rank: Int, m: CategorySum) {
 }
 
 @Composable
-fun WeekBars(days: List<DaySum>, start: LocalDate) {
-    val max = (days.maxOfOrNull { it.cents } ?: 0L).coerceAtLeast(1L)
-    val today = LocalDate.now()
-    Row(
-        Modifier
-            .fillMaxWidth()
-            .height(118.dp),
-        horizontalArrangement = Arrangement.spacedBy(6.dp),
-    ) {
-        (0..6).forEach { i ->
-            val d = start.plusDays(i.toLong())
-            val cents = days.firstOrNull { it.date == d }?.cents ?: 0L
-            val ratio = (cents.toFloat() / max).coerceIn(0f, 1f)
-            val h = if (cents == 0L) 3f else (ratio * 84f).coerceAtLeast(8f)
-            Column(
-                Modifier.weight(1f).fillMaxHeight(),
-                verticalArrangement = Arrangement.Bottom,
-                horizontalAlignment = Alignment.CenterHorizontally,
-            ) {
-                Box(
-                    Modifier
-                        .fillMaxWidth(0.62f)
-                        .height(h.dp)
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(
-                            when {
-                                d == today -> Ink.AccentFill
-                                cents == 0L -> Ink.Hairline
-                                else -> Ink.BarIdle
-                            }
-                        )
-                )
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    weekdayLabel(d),
-                    style = ZType.micro,
-                    color = if (d == today) Ink.Accent else Ink.Text2,
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun CategoryRow(name: String, cents: Long, total: Long) {
-    val pct = if (total > 0) (cents * 100.0 / total).toInt() else 0
-    Column(Modifier.padding(vertical = 7.dp)) {
-        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-            Text(name, style = ZType.bodySmall, color = Ink.Text)
-            Row {
-                Text(money(cents), style = ZType.bodySmall, color = Ink.Text)
-                Spacer(Modifier.width(10.dp))
-                Text(
-                    "$pct%", style = ZType.secondary, color = Ink.Text2,
-                    modifier = Modifier.width(38.dp), textAlign = TextAlign.End
-                )
-            }
-        }
-        Spacer(Modifier.height(6.dp))
-        Box(
-            Modifier
-                .fillMaxWidth()
-                .height(3.dp)
-                .clip(RoundedCornerShape(2.dp))
-                .background(Ink.Hairline)
-        ) {
-            Box(
-                Modifier
-                    .fillMaxWidth((pct.coerceIn(0, 100)) / 100f)
-                    .fillMaxHeight()
-                    .clip(RoundedCornerShape(2.dp))
-                    .background(Ink.AccentFill)
-            )
-        }
-    }
-}
-
-@Composable
 fun BillRow(b: Bill) {
     val isConsumption = b.flowType == FlowType.CONSUMPTION && b.direction == Direction.EXPENSE
     Row(
         Modifier
             .fillMaxWidth()
-            .padding(vertical = 11.dp),
+            .heightIn(min = 52.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
@@ -1376,44 +1788,358 @@ fun BillRow(b: Bill) {
                 maxLines = 1,
             )
             Spacer(Modifier.height(3.dp))
-            Text(
-                "%s %s · %s".format(
-                    weekdayLabel(b.txnTime.toLocalDate()),
-                    "%02d:%02d".format(b.txnTime.hour, b.txnTime.minute),
-                    if (isConsumption) b.category else b.flowType.label,
-                ),
-                style = ZType.caption,
-                color = Ink.Text2,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                // 只有「非消费」才需要徽章；收入由「+」表达，不必再贴标签
+                if (b.flowType != FlowType.CONSUMPTION) {
+                    MiniBadge(b.flowType.label)
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(
+                    buildString {
+                        append("%02d:%02d".format(b.txnTime.hour, b.txnTime.minute))
+                        if (isConsumption) append(" · ").append(b.category)
+                        else if (b.direction == Direction.INCOME) append(" · 收入")
+                    },
+                    style = ZType.caption,
+                    color = Ink.Text3,
+                    maxLines = 1,
+                )
+            }
         }
         Text(
             (if (b.direction == Direction.INCOME) "+" else "") + money(b.amountCents),
             style = ZType.bodySmall,
             color = when {
-                b.direction == Direction.INCOME -> Ink.Accent
+                b.direction == Direction.INCOME -> Ink.Down
                 isConsumption -> Ink.Text
-                else -> Ink.Text2
+                else -> Ink.Text3
             },
         )
     }
-    HorizontalDivider(color = Ink.Hairline)
 }
 
-/**
- * 只负责把文件原样读出来。解压、解码、格式识别全部交给 Parser。
- *
- * 选择器不限制 MIME 类型，用户完全可能误选一个几百 MB 的视频。整份读进内存会
- * 直接 OOM，所以按字节数硬限，超了就报错而不是崩掉。
- */
+/** 12 周趋势。点柱子直接跳到那一周 */
+@Composable
+fun TrendCard(trend: List<Pair<LocalDate, Long>>, onPick: (LocalDate) -> Unit) {
+    val max = (trend.maxOfOrNull { it.second } ?: 0L).coerceAtLeast(1L)
+    val mean = if (trend.isEmpty()) 0L else trend.sumOf { it.second } / trend.size
+    val currentWeek = trend.lastOrNull()?.first
+    val lineColor = Ink.Hairline
+    val barColor = Ink.BarIdle
+    val accent = Ink.AccentFill
+    val labelColor = Ink.Text3
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Ink.Surface),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, Ink.Border),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(16.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text("每周支出", style = ZType.caption, color = labelColor)
+                Text("周均 ${money(mean)}", style = ZType.micro, color = labelColor)
+            }
+            Spacer(Modifier.height(12.dp))
+            Box(
+                Modifier
+                    .fillMaxWidth()
+                    .height(150.dp)
+            ) {
+                Row(
+                    Modifier.fillMaxSize(),
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                ) {
+                    trend.forEach { (w, cents) ->
+                        val ratio = (cents.toFloat() / max).coerceIn(0f, 1f)
+                        val barH by animateFloatAsState(
+                            targetValue = (ratio * 128f).coerceAtLeast(2f),
+                            animationSpec = tween(320),
+                            label = "trendBar",
+                        )
+                        Column(
+                            Modifier
+                                .weight(1f)
+                                .fillMaxHeight()
+                                .clip(RoundedCornerShape(6.dp))
+                                .clickable { onPick(w) },
+                            verticalArrangement = Arrangement.Bottom,
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                        ) {
+                            Box(
+                                Modifier
+                                    .fillMaxWidth(0.72f)
+                                    .height(barH.dp)
+                                    .clip(RoundedCornerShape(3.dp))
+                                    .background(if (w == currentWeek) accent else barColor)
+                            )
+                        }
+                    }
+                }
+                if (mean > 0) {
+                    Canvas(Modifier.matchParentSize()) {
+                        val y = size.height * (1f - mean.toFloat() / max)
+                        drawLine(
+                            color = lineColor,
+                            start = Offset(0f, y),
+                            end = Offset(size.width, y),
+                            strokeWidth = 1f,
+                            pathEffect = PathEffect.dashPathEffect(floatArrayOf(6f, 6f)),
+                        )
+                    }
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                Text(
+                    trend.firstOrNull()?.first?.let { "${it.monthValue}/${it.dayOfMonth}" } ?: "",
+                    style = ZType.micro,
+                    color = labelColor,
+                )
+                Text("最近 12 周", style = ZType.micro, color = labelColor)
+                Text("本周", style = ZType.micro, color = accent)
+            }
+        }
+    }
+}
+
+@Composable
+fun TrendStats(trend: List<Pair<LocalDate, Long>>) {
+    if (trend.isEmpty()) return
+    val maxEntry = trend.maxByOrNull { it.second } ?: return
+    val minEntry = trend.filter { it.second > 0 }.minByOrNull { it.second }
+    val mean = trend.sumOf { it.second } / trend.size
+    val above = trend.count { it.second > mean }
+
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Ink.Surface),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, Ink.Border),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            StatCell("最高一周", money(maxEntry.second), weekRange(maxEntry.first), Modifier.weight(1f))
+            VerticalDivider(color = Ink.Hairline, modifier = Modifier.height(34.dp))
+            StatCell(
+                "最低一周",
+                minEntry?.let { money(it.second) } ?: "—",
+                minEntry?.let { weekRange(it.first) } ?: "",
+                Modifier.weight(1f),
+            )
+            VerticalDivider(color = Ink.Hairline, modifier = Modifier.height(34.dp))
+            StatCell("高于均值", "$above 周", "共 ${trend.size} 周", Modifier.weight(1f))
+        }
+    }
+}
+
+@Composable
+fun StatCell(key: String, value: String, sub: String, modifier: Modifier = Modifier) {
+    Column(modifier.padding(horizontal = 14.dp)) {
+        Text(key, style = ZType.micro, color = Ink.Text3)
+        Spacer(Modifier.height(2.dp))
+        Text(value, style = ZType.bodySmall, color = Ink.Text, fontWeight = FontWeight.SemiBold)
+        if (sub.isNotEmpty()) {
+            Spacer(Modifier.height(1.dp))
+            Text(sub, style = ZType.micro, color = Ink.Text3)
+        }
+    }
+}
+
+fun weekRange(start: LocalDate): String {
+    val end = start.plusDays(6)
+    return "${start.monthValue}/${start.dayOfMonth} – ${end.monthValue}/${end.dayOfMonth}"
+}
+
+/** 分类下钻：这个分类这周/这月的每一笔都在这里，包括退款 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CategoryDrillSheet(
+    category: String,
+    from: LocalDate,
+    to: LocalDate,
+    periodLabel: String,
+    categoryTotal: Long,
+    periodTotal: Long,
+    store: BillStore,
+    onDismiss: () -> Unit,
+    onManageRules: () -> Unit,
+) {
+    var rows by remember { mutableStateOf<List<Bill>>(emptyList()) }
+    LaunchedEffect(category, from, to) {
+        rows = withContext(Dispatchers.IO) {
+            store.billsOfRange(from, to).filter { it.category == category }
+        }
+    }
+    val pct = if (periodTotal > 0) (categoryTotal * 100.0 / periodTotal).toInt() else 0
+
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = Ink.Surface) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .heightIn(max = 620.dp)
+                .verticalScroll(rememberScrollState())
+                .padding(horizontal = 20.dp)
+                .padding(bottom = 28.dp),
+        ) {
+            Text(category, style = ZType.title, color = Ink.Text)
+            Spacer(Modifier.height(10.dp))
+            Row {
+                Text(
+                    "¥",
+                    style = ZType.secondary,
+                    color = Ink.Text3,
+                    modifier = Modifier.alignByBaseline(),
+                )
+                Text(
+                    amountDigits(categoryTotal),
+                    style = ZType.displaySmall,
+                    color = Ink.Text,
+                    modifier = Modifier.alignByBaseline(),
+                )
+            }
+            Spacer(Modifier.height(4.dp))
+            Text(
+                "$periodLabel · ${rows.size} 笔 · 占 $pct%",
+                style = ZType.caption,
+                color = Ink.Text2,
+            )
+            Spacer(Modifier.height(10.dp))
+
+            rows.forEach { b ->
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .heightIn(min = 50.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            b.counterparty.ifBlank { b.item.ifBlank { "—" } },
+                            style = ZType.bodySmall,
+                            color = Ink.Text,
+                            maxLines = 1,
+                        )
+                        Spacer(Modifier.height(2.dp))
+                        Text(
+                            "${b.txnTime.monthValue}/${b.txnTime.dayOfMonth} " +
+                                    "%02d:%02d".format(b.txnTime.hour, b.txnTime.minute) +
+                                    " · " + b.flowType.label,
+                            style = ZType.caption,
+                            color = Ink.Text3,
+                            maxLines = 1,
+                        )
+                    }
+                    Text(
+                        money(b.amountCents),
+                        style = ZType.bodySmall,
+                        color = if (b.flowType == FlowType.CONSUMPTION) Ink.Text else Ink.Text3,
+                    )
+                }
+                HorizontalDivider(color = Ink.Hairline)
+            }
+
+            if (rows.isEmpty()) {
+                Text("这个分类没有可列的明细。", style = ZType.secondary, color = Ink.Text3)
+            }
+
+            Spacer(Modifier.height(18.dp))
+            TextButton(onClick = onManageRules, contentPadding = PaddingValues(0.dp)) {
+                Text("管理分类规则 ›", style = ZType.secondary, color = Ink.Accent)
+            }
+        }
+    }
+}
+
+/** 一次性提示：刚导完才出现，可撤销、也可直接关掉，不常驻首屏 */
+@Composable
+fun UndoStrip(count: Int, onUndo: () -> Unit, onDismiss: () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .background(Ink.Sunk)
+            .padding(start = 10.dp, end = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("上次导入新增 $count 条", style = ZType.caption, color = Ink.Text2)
+        Spacer(Modifier.weight(1f))
+        TextButton(onClick = onUndo, contentPadding = PaddingValues(horizontal = 8.dp)) {
+            Text("撤销", style = ZType.secondary, color = Ink.Accent)
+        }
+        IconButton(onClick = onDismiss, modifier = Modifier.size(28.dp)) {
+            Icon(
+                Icons.Rounded.Close,
+                contentDescription = "关闭提示",
+                tint = Ink.Text3,
+                modifier = Modifier.size(14.dp),
+            )
+        }
+    }
+}
+
+/** 空周不该只画一张全零的图。给出去处，比给一个「没有数据」有用 */
+@Composable
+fun EmptyWeekCard(lastWeek: LocalDate?, onJump: (LocalDate) -> Unit) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = Ink.Surface),
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(1.dp, Ink.Border),
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 22.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Box(
+                Modifier
+                    .size(40.dp)
+                    .clip(CircleShape)
+                    .background(Ink.Sunk),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text("↓", style = ZType.body, color = Ink.Text3)
+            }
+            Spacer(Modifier.height(12.dp))
+            Text(
+                "导入这周的账单后，\n这里会按天显示支出和明细。",
+                style = ZType.secondary,
+                color = Ink.Text2,
+                textAlign = TextAlign.Center,
+            )
+            if (lastWeek != null) {
+                Spacer(Modifier.height(8.dp))
+                Text(
+                    "上次有记录：${Week.rangeLabel(lastWeek)} ›",
+                    style = ZType.caption,
+                    color = Ink.Accent,
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(6.dp))
+                        .clickable { onJump(lastWeek) }
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                )
+            }
+        }
+    }
+}
+
+/** 只负责把文件原样读出来。解压、解码、格式识别全部交给 Parser。 */
 private fun readBytes(ctx: Context, uri: Uri): Pair<ByteArray, String> {
     val name = ctx.contentResolver.query(uri, null, null, null, null)?.use { c ->
         val i = c.getColumnIndex(OpenableColumns.DISPLAY_NAME)
         if (i >= 0 && c.moveToFirst()) c.getString(i) else null
     } ?: "账单"
 
-    val raw = ctx.contentResolver.openInputStream(uri)?.use {
-        it.readCapped(Limits.MAX_INPUT_BYTES)
-    } ?: throw IOException("读不到这个文件")
+    val raw = ctx.contentResolver.openInputStream(uri)?.use { it.readBytes() }
+        ?: throw IOException("读不到这个文件")
 
     return raw to name
 }
