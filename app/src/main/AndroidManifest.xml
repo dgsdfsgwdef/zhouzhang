@@ -1,10 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  刻意不声明 INTERNET 权限。
-  这个 App 从系统层面就不具备联网能力，用户在「应用信息 - 权限」里能自己看到。
-  这比任何隐私声明都管用。
+  权限说明：
+  INTERNET 只用于连接用户自己填写的 IMAP 服务器（默认 imaps:993，强制 TLS）。
+  没有统计 SDK、没有广告、没有任何第三方服务端。收发的全部内容只在本机解析。
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:allowBackup="false"

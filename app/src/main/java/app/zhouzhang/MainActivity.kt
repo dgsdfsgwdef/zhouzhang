@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.MailOutline
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -28,6 +29,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -42,7 +44,13 @@ import app.zhouzhang.data.CategorySum
 import app.zhouzhang.data.DaySum
 import app.zhouzhang.data.MerchantSum
 import app.zhouzhang.data.MonthSummary
+import app.zhouzhang.data.SecretBox
 import app.zhouzhang.data.WeekSummary
+import app.zhouzhang.mail.ImapClient
+import app.zhouzhang.mail.MailAccount
+import app.zhouzhang.mail.MailAttachment
+import app.zhouzhang.mail.MailConfig
+import app.zhouzhang.mail.MailPresets
 import app.zhouzhang.ui.Ink
 import app.zhouzhang.ui.ZhouTheme
 import kotlinx.coroutines.Dispatchers
@@ -109,6 +117,9 @@ fun HomeScreen(store: BillStore) {
     var hasData by remember { mutableStateOf(false) }
     var undoCount by remember { mutableStateOf(0) }
     var showRules by remember { mutableStateOf(false) }
+    var showSettings by remember { mutableStateOf(false) }
+    var mailConfigured by remember { mutableStateOf(false) }
+    var pendingMail by remember { mutableStateOf<MailAttachment?>(null) }
 
     fun refresh() {
         weekSum = store.summary(weekStart)
@@ -117,6 +128,7 @@ fun HomeScreen(store: BillStore) {
         earliest = store.earliestDate()
         hasData = store.totalCount() > 0
         undoCount = store.pendingUndoCount()
+        mailConfigured = MailConfig.load(ctx) != null
 
         // 本周只过了几天，就只和上周同样天数比；过去的周则整周对比。
         val days = if (weekStart == thisWeek) {
@@ -214,6 +226,81 @@ fun HomeScreen(store: BillStore) {
         if (!uris.isNullOrEmpty()) importFiles(uris, null)
     }
 
+    /**
+     * 从邮箱收账单。附件直接解析入库，用户不用再选文件。
+     * 加密包先用记住的解压码试，解不开就问一次。
+     */
+    fun syncMail() {
+        val account = MailConfig.load(ctx)
+        if (account == null) {
+            message = "还没有配置邮箱"
+            return
+        }
+        busy = true
+        scope.launch {
+            try {
+                val attachments = withContext(Dispatchers.IO) { ImapClient.fetchBills(account) }
+                if (attachments.isEmpty()) {
+                    message = "最近 45 天没有找到账单邮件"
+                    return@launch
+                }
+
+                val stored = SecretBox.get(ctx, "zip_password")
+                var parsed = 0
+                var added = 0
+                var duplicated = 0
+                var skipped = 0
+                var needPassword: MailAttachment? = null
+
+                for (a in attachments) {
+                    val result = withContext(Dispatchers.Default) {
+                        Parser.parse(a.bytes, a.fileName, stored)
+                    }
+                    when {
+                        result.needsPassword -> {
+                            needPassword = a
+                            break
+                        }
+
+                        result.error != null -> skipped++
+
+                        else -> {
+                            val counts = withContext(Dispatchers.IO) { store.insertAll(result.bills) }
+                            parsed += result.bills.size
+                            added += counts.first
+                            duplicated += counts.second
+                        }
+                    }
+                }
+
+                if (needPassword != null) {
+                    pendingMail = needPassword
+                    passwordError = "邮件里的账单压缩包有密码"
+                    askPassword = true
+                    return@launch
+                }
+
+                message = buildString {
+                    append("收到 ${attachments.size} 个附件\n\n")
+                    append("解析 $parsed 条\n")
+                    append("新增 $added 条，重复 $duplicated 条")
+                    if (skipped > 0) append("\n跳过 $skipped 个无法解析的附件")
+                }
+                if (added > 0) {
+                    withContext(Dispatchers.IO) { store.latestDataWeek() }?.let { latest ->
+                        weekStart = latest
+                        month = YearMonth.from(latest)
+                    }
+                }
+                withContext(Dispatchers.IO) { refresh() }
+            } catch (e: Exception) {
+                message = "收信失败：${e.message ?: e.javaClass.simpleName}"
+            } finally {
+                busy = false
+            }
+        }
+    }
+
     val mimeTypes = arrayOf(
         "text/csv",
         "text/comma-separated-values",
@@ -269,8 +356,13 @@ fun HomeScreen(store: BillStore) {
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
                     ModeSwitch(mode) { mode = it }
-                    TextButton(onClick = { showRules = true }) {
-                        Text("分类整理", fontSize = 13.sp, color = Ink.Muted)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        TextButton(onClick = { showRules = true }) {
+                            Text("分类整理", fontSize = 13.sp, color = Ink.Muted)
+                        }
+                        IconButton(onClick = { showSettings = true }) {
+                            Icon(Icons.Rounded.MailOutline, "邮箱收单", tint = Ink.Muted)
+                        }
                     }
                 }
                 if (undoCount > 0) {
@@ -479,8 +571,17 @@ fun HomeScreen(store: BillStore) {
                     onClick = {
                         val uri = pendingUri
                         val queue = pendingQueue
+                        val mail = pendingMail
+                        val pwd = password
                         askPassword = false
-                        if (uri != null) importFiles(listOf(uri) + queue, password)
+                        if (mail != null) {
+                            // 记住解压码，然后重收一次；下次同类账单就不用再问
+                            SecretBox.put(ctx, "zip_password", pwd)
+                            pendingMail = null
+                            syncMail()
+                        } else if (uri != null) {
+                            importFiles(listOf(uri) + queue, pwd)
+                        }
                     }
                 ) { Text("解压") }
             },
@@ -502,6 +603,22 @@ fun HomeScreen(store: BillStore) {
             containerColor = Ink.Surface,
         ) {
             RulesSheet(store) { refresh() }
+        }
+    }
+
+    if (showSettings) {
+        ModalBottomSheet(
+            onDismissRequest = { showSettings = false },
+            containerColor = Ink.Surface,
+        ) {
+            MailSheet(
+                onClose = { showSettings = false },
+                onSync = {
+                    showSettings = false
+                    syncMail()
+                },
+                onChanged = { scope.launch { withContext(Dispatchers.IO) { refresh() } } },
+            )
         }
     }
 }
@@ -738,6 +855,210 @@ fun RulesSheet(store: BillStore, onChanged: () -> Unit) {
 }
 
 val CATEGORIES = listOf("餐饮", "交通", "购物", "居家", "娱乐", "医疗", "教育", "通讯", "其他")
+
+/** 邮箱收单配置：IMAP 账号 + 账单解压码 */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun MailSheet(onClose: () -> Unit, onSync: () -> Unit, onChanged: () -> Unit) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+
+    var host by remember { mutableStateOf("imap.qq.com") }
+    var port by remember { mutableStateOf("993") }
+    var user by remember { mutableStateOf("") }
+    var password by remember { mutableStateOf("") }
+    var zipPwd by remember { mutableStateOf("") }
+    var status by remember { mutableStateOf<String?>(null) }
+    var configured by remember { mutableStateOf(false) }
+    var working by remember { mutableStateOf(false) }
+
+    LaunchedEffect(Unit) {
+        withContext(Dispatchers.IO) {
+            MailConfig.load(ctx)?.let {
+                host = it.host
+                port = it.port.toString()
+                user = it.user
+                password = it.password
+                configured = true
+            }
+            zipPwd = SecretBox.get(ctx, "zip_password") ?: ""
+        }
+    }
+
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .heightIn(max = 640.dp)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 20.dp)
+            .padding(bottom = 28.dp),
+    ) {
+        Text("邮箱收单", fontSize = 17.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+        Spacer(Modifier.height(4.dp))
+        Text(
+            "绑定后，账单邮件到了点一下就能导入，不用再翻文件夹。填的是 IMAP 授权码，不是邮箱登录密码。",
+            fontSize = 12.sp,
+            lineHeight = 18.sp,
+            color = Ink.Muted,
+        )
+
+        Spacer(Modifier.height(16.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            MailPresets.list.forEach { (name, h, p) ->
+                AssistChip(
+                    onClick = {
+                        host = h
+                        port = p.toString()
+                    },
+                    label = { Text(name, fontSize = 11.sp) },
+                )
+            }
+        }
+
+        Spacer(Modifier.height(14.dp))
+        OutlinedTextField(
+            value = host,
+            onValueChange = { host = it },
+            singleLine = true,
+            label = { Text("IMAP 服务器") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(
+            value = port,
+            onValueChange = { port = it.filter { c -> c.isDigit() } },
+            singleLine = true,
+            label = { Text("端口") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(
+            value = user,
+            onValueChange = { user = it },
+            singleLine = true,
+            label = { Text("邮箱账号") },
+            modifier = Modifier.fillMaxWidth(),
+        )
+        Spacer(Modifier.height(10.dp))
+        OutlinedTextField(
+            value = password,
+            onValueChange = { password = it },
+            singleLine = true,
+            label = { Text("授权码") },
+            visualTransformation = PasswordVisualTransformation(),
+            modifier = Modifier.fillMaxWidth(),
+        )
+
+        Spacer(Modifier.height(14.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            OutlinedButton(
+                onClick = {
+                    working = true
+                    status = "连接中…"
+                    scope.launch {
+                        val result = withContext(Dispatchers.IO) {
+                            runCatching {
+                                ImapClient.test(
+                                    MailAccount(host.trim(), port.toIntOrNull() ?: 993,
+                                        user.trim(), password)
+                                )
+                            }
+                        }
+                        status = result.fold(
+                            { "连接成功" },
+                            { "连接失败：${it.message ?: it.javaClass.simpleName}" }
+                        )
+                        working = false
+                    }
+                },
+                enabled = !working && user.isNotBlank() && password.isNotBlank(),
+            ) { Text("测试连接", fontSize = 13.sp) }
+
+            Button(
+                onClick = {
+                    MailConfig.save(
+                        ctx,
+                        MailAccount(host.trim(), port.toIntOrNull() ?: 993, user.trim(), password)
+                    )
+                    configured = true
+                    status = "已保存"
+                    onChanged()
+                },
+                enabled = user.isNotBlank() && password.isNotBlank(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Ink.Text,
+                    contentColor = Color.White,
+                ),
+            ) { Text("保存", fontSize = 13.sp) }
+        }
+
+        if (status != null) {
+            Spacer(Modifier.height(8.dp))
+            Text(status!!, fontSize = 12.sp, color = Ink.Muted)
+        }
+
+        if (configured) {
+            Spacer(Modifier.height(16.dp))
+            Button(
+                onClick = onSync,
+                enabled = !working,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Ink.Amber,
+                    contentColor = Color.White,
+                ),
+                shape = RoundedCornerShape(12.dp),
+            ) { Text("立即收信", fontSize = 15.sp) }
+        }
+
+        Spacer(Modifier.height(24.dp))
+        Text("账单解压码", fontSize = 13.sp, color = Ink.Muted)
+        Spacer(Modifier.height(6.dp))
+        Text(
+            "支付宝的交易明细 zip 是加密的，存一次就不用每次输入。",
+            fontSize = 12.sp,
+            color = Ink.Muted,
+        )
+        Spacer(Modifier.height(10.dp))
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            OutlinedTextField(
+                value = zipPwd,
+                onValueChange = { zipPwd = it },
+                singleLine = true,
+                label = { Text("解压码") },
+                visualTransformation = PasswordVisualTransformation(),
+                modifier = Modifier.weight(1f),
+            )
+            Spacer(Modifier.width(10.dp))
+            TextButton(
+                onClick = {
+                    if (zipPwd.isBlank()) {
+                        SecretBox.remove(ctx, "zip_password")
+                        status = "已清除解压码"
+                    } else {
+                        SecretBox.put(ctx, "zip_password", zipPwd)
+                        status = "已保存解压码"
+                    }
+                }
+            ) { Text("保存", fontSize = 13.sp, color = Ink.Amber) }
+        }
+
+        if (configured) {
+            Spacer(Modifier.height(22.dp))
+            TextButton(
+                onClick = {
+                    MailConfig.clear(ctx)
+                    configured = false
+                    password = ""
+                    status = "已解除绑定"
+                    onChanged()
+                }
+            ) { Text("解除邮箱绑定", fontSize = 13.sp, color = Ink.Muted) }
+        }
+
+        Spacer(Modifier.height(16.dp))
+    }
+}
 
 @Composable
 fun ModeSwitch(mode: Mode, onChange: (Mode) -> Unit) {

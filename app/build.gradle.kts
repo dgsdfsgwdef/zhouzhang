@@ -11,8 +11,8 @@ android {
         applicationId = "app.zhouzhang"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = 4
+        versionName = "0.4.0"
     }
 
     buildTypes {
@@ -41,6 +41,9 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+        // android-mail 与 android-activation 都带同名声明文件
+        resources.excludes += "/META-INF/NOTICE.md"
+        resources.excludes += "/META-INF/LICENSE.md"
     }
 
     // sqlcipher-android 会带进 kotlin-stdlib 2.1.x，而本项目用 Kotlin 1.9.24，
@@ -83,6 +86,10 @@ dependencies {
     implementation("net.zetetic:sqlcipher-android:4.17.0")
     // SQLCipher 的 SQLiteDatabase 实现自 SupportSQLiteDatabase，编译期需要它
     implementation("androidx.sqlite:sqlite:2.3.0")
+
+    // 邮箱收单：JavaMail 的 Android 移植版
+    implementation("com.sun.mail:android-mail:1.6.7")
+    implementation("com.sun.mail:android-activation:1.6.7")
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("net.sf.kxml:kxml2:2.3.0")
