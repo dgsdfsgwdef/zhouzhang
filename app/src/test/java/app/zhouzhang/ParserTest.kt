@@ -150,15 +150,21 @@ class ParserTest {
     }
 
     @Test
-    fun `周起始日按周三计算`() {
-        // 2026-11-18 是周三
+    fun `默认周一为周起点，也可以指定其他起始日`() {
+        // 默认：周一
+        assertEquals(1, Week.DEFAULT_START_DAY)
+        // 2026-11-18 是周三，本周一为 11-16
+        val mon = LocalDate.of(2026, 11, 16)
         val wed = LocalDate.of(2026, 11, 18)
-        assertEquals(wed, Week.startOf(wed))
-        // 周二应归到前一个周三
-        assertEquals(wed, Week.startOf(LocalDate.of(2026, 11, 24)))
-        // 周四应归到本周三
-        assertEquals(wed, Week.startOf(LocalDate.of(2026, 11, 19)))
-        assertEquals("2026-11-18", Week.key(wed))
+        assertEquals(mon, Week.startOf(wed))
+        assertEquals("2026-11-16", Week.key(wed))
+        // 周日归到上一个周一
+        assertEquals(mon, Week.startOf(LocalDate.of(2026, 11, 22)))
+
+        // 改成周三起：11-18 本身是起点，11-19 归到本周
+        assertEquals(wed, Week.startOf(wed, 3))
+        assertEquals(wed, Week.startOf(LocalDate.of(2026, 11, 19), 3))
+        assertEquals("2026-11-18", Week.key(wed, 3))
         assertEquals("11/18 – 11/24", Week.rangeLabel(wed))
     }
 

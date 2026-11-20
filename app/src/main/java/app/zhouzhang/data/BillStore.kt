@@ -53,6 +53,7 @@ class BillStore(private val context: Context) {
         private const val PREFS = "zz_import"
         private const val PREF_UNDO_MAX_ID = "undo_max_id"
         private const val PREF_UNDO_COUNT = "undo_count"
+        private const val PREF_WEEK_START = "week_start_day"
 
         /** 与建表顺序一致，迁移时按列拷贝 */
         private val COLUMNS = listOf(
@@ -121,6 +122,7 @@ class BillStore(private val context: Context) {
         file.parentFile?.mkdirs()
 
         val db = openOrMigrate(file)
+        ensureWeekStart(db)
         opened = db
         return db
     }
@@ -209,10 +211,54 @@ class BillStore(private val context: Context) {
         }
     }
 
+    fun weekStartDay(): Int = prefs.getInt(PREF_WEEK_START, Week.DEFAULT_START_DAY)
+
+    /**
+     * 0.3 及更早的版本固定按周三分周。升级后默认改成周一，
+     * 如果不重算，旧数据会整批落错周。这里用「配置项是否存在」判断是否首次运行。
+     */
+    private fun ensureWeekStart(db: SQLiteDatabase) {
+        if (prefs.contains(PREF_WEEK_START)) return
+        prefs.edit().putInt(PREF_WEEK_START, Week.DEFAULT_START_DAY).apply()
+        rewriteWeekKeys(db, Week.DEFAULT_START_DAY)
+    }
+
+    /**
+     * 改周起始日要重算所有记录的 week_start，否则历史数据会落在错误的周里。
+     * 返回被重写的行数。
+     */
+    fun setWeekStartDay(day: Int): Int {
+        prefs.edit().putInt(PREF_WEEK_START, day).apply()
+        return rewriteWeekKeys(db(), day)
+    }
+
+    private fun rewriteWeekKeys(db: SQLiteDatabase, day: Int): Int {
+        val rows = ArrayList<Pair<Long, String>>()
+        db.rawQuery("SELECT id, txn_time FROM bill", null).use { c ->
+            while (c.moveToNext()) {
+                val date = Instant.ofEpochMilli(c.getLong(1))
+                    .atZone(ZoneId.systemDefault()).toLocalDate()
+                rows.add(c.getLong(0) to Week.key(date, day))
+            }
+        }
+
+        db.beginTransaction()
+        try {
+            for ((id, key) in rows) {
+                db.execSQL("UPDATE bill SET week_start=? WHERE id=?", arrayOf(key, id))
+            }
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
+        return rows.size
+    }
+
     /** 返回 (新增, 重复)。重复靠 (platform, order_no) 唯一索引挡掉。 */
-    fun insertAll(bills: List<Bill>, startDay: Int = Week.DEFAULT_START_DAY): Pair<Int, Int> {
+    fun insertAll(bills: List<Bill>): Pair<Int, Int> {
         if (bills.isEmpty()) return 0 to 0
         val db = db()
+        val startDay = weekStartDay()
 
         // 用户规则优先于内置关键词
         val rules = rules(db)

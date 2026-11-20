@@ -55,13 +55,13 @@ data class ParseResult(
 )
 
 /**
- * 周起始日可配置（1=周一 … 7=周日），默认 3（周三）。
+ * 周起始日可配置（1=周一 … 7=周日），默认 1（周一）。
  *
  * 不用 ISO 周编号做键：ISO 8601 假定周一开始，起始日改成周三后
  * 「2026-W47」会横跨两个自然周，指代不明。用起始日期做键，排序即时间序。
  */
 object Week {
-    const val DEFAULT_START_DAY = 3
+    const val DEFAULT_START_DAY = 1
 
     fun startOf(date: LocalDate, startDay: Int = DEFAULT_START_DAY): LocalDate {
         val diff = (date.dayOfWeek.value - startDay + 7) % 7

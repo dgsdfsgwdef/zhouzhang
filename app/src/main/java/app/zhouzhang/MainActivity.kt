@@ -20,7 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ChevronLeft
 import androidx.compose.material.icons.rounded.ChevronRight
-import androidx.compose.material.icons.rounded.MailOutline
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -92,7 +92,8 @@ fun HomeScreen(store: BillStore) {
     val scope = rememberCoroutineScope()
 
     val today = remember { LocalDate.now() }
-    val thisWeek = remember { Week.startOf(today) }
+    var startDay by remember { mutableStateOf(Week.DEFAULT_START_DAY) }
+    val thisWeek = Week.startOf(today, startDay)
     val thisMonth = remember { YearMonth.from(today) }
 
     var mode by remember { mutableStateOf(Mode.WEEK) }
@@ -129,6 +130,7 @@ fun HomeScreen(store: BillStore) {
         hasData = store.totalCount() > 0
         undoCount = store.pendingUndoCount()
         mailConfigured = MailConfig.load(ctx) != null
+        startDay = store.weekStartDay()
 
         // 本周只过了几天，就只和上周同样天数比；过去的周则整周对比。
         val days = if (weekStart == thisWeek) {
@@ -361,7 +363,7 @@ fun HomeScreen(store: BillStore) {
                             Text("分类整理", fontSize = 13.sp, color = Ink.Muted)
                         }
                         IconButton(onClick = { showSettings = true }) {
-                            Icon(Icons.Rounded.MailOutline, "邮箱收单", tint = Ink.Muted)
+                            Icon(Icons.Rounded.Settings, "设置", tint = Ink.Muted)
                         }
                     }
                 }
@@ -611,13 +613,21 @@ fun HomeScreen(store: BillStore) {
             onDismissRequest = { showSettings = false },
             containerColor = Ink.Surface,
         ) {
-            MailSheet(
+            SettingsSheet(
                 onClose = { showSettings = false },
                 onSync = {
                     showSettings = false
                     syncMail()
                 },
                 onChanged = { scope.launch { withContext(Dispatchers.IO) { refresh() } } },
+                onWeekStartChanged = { day ->
+                    scope.launch {
+                        withContext(Dispatchers.IO) { store.setWeekStartDay(day) }
+                        weekStart = Week.startOf(today, day)
+                        withContext(Dispatchers.IO) { refresh() }
+                    }
+                },
+                currentWeekStart = startDay,
             )
         }
     }
@@ -856,10 +866,19 @@ fun RulesSheet(store: BillStore, onChanged: () -> Unit) {
 
 val CATEGORIES = listOf("餐饮", "交通", "购物", "居家", "娱乐", "医疗", "教育", "通讯", "其他")
 
-/** 邮箱收单配置：IMAP 账号 + 账单解压码 */
+/** 索引 0 对应周一（LocalDate.dayOfWeek.value = 1） */
+val WEEK_DAY_LABELS = listOf("一", "二", "三", "四", "五", "六", "日")
+
+/** 设置：周起始日 + 邮箱收单 + 账单解压码 */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MailSheet(onClose: () -> Unit, onSync: () -> Unit, onChanged: () -> Unit) {
+fun SettingsSheet(
+    onClose: () -> Unit,
+    onSync: () -> Unit,
+    onChanged: () -> Unit,
+    onWeekStartChanged: (Int) -> Unit,
+    currentWeekStart: Int,
+) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
 
@@ -893,7 +912,37 @@ fun MailSheet(onClose: () -> Unit, onSync: () -> Unit, onChanged: () -> Unit) {
             .padding(horizontal = 20.dp)
             .padding(bottom = 28.dp),
     ) {
-        Text("邮箱收单", fontSize = 17.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+        Text("设置", fontSize = 17.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
+
+        Spacer(Modifier.height(18.dp))
+        Text("每周从哪天开始", fontSize = 13.sp, color = Ink.Muted)
+        Spacer(Modifier.height(8.dp))
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            WEEK_DAY_LABELS.forEachIndexed { index, label ->
+                val day = index + 1
+                val selected = day == currentWeekStart
+                Box(
+                    Modifier
+                        .weight(1f)
+                        .clip(RoundedCornerShape(9.dp))
+                        .background(if (selected) Ink.Text else Ink.Bg)
+                        .clickable { onWeekStartChanged(day) }
+                        .padding(vertical = 9.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        label,
+                        fontSize = 12.sp,
+                        color = if (selected) Color.White else Ink.Muted,
+                    )
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        Text("改完之后历史数据会重新分周。", fontSize = 11.sp, color = Ink.Muted)
+
+        Spacer(Modifier.height(26.dp))
+        Text("邮箱收单", fontSize = 15.sp, fontWeight = FontWeight.Medium, color = Ink.Text)
         Spacer(Modifier.height(4.dp))
         Text(
             "绑定后，账单邮件到了点一下就能导入，不用再翻文件夹。填的是 IMAP 授权码，不是邮箱登录密码。",
